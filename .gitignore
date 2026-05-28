@@ -216,3 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Repo-specific ignores
+sdk-src/
+examples/
+build/
+*code-workspace
+.claude/
+.env
+.env.*
+mcp.json
+.mcp.json
+
+# Web subproject
+web/node_modules/
+web/out/
+web/.next/
+web/test-results/
+web/playwright-report/
+web/playwright/.cache/
+web/*.tsbuildinfo
+web/next-env.d.ts
+web/.pnp.*
+web/.yarn/
