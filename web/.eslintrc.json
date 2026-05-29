@@ -1,0 +1,29 @@
+{
+    "extends": ["next/core-web-vitals"],
+    "rules": {
+        "react/no-danger": "error",
+        "no-restricted-syntax": [
+            "error",
+            {
+                "selector": "MemberExpression[object.name='document'][property.name='cookie']",
+                "message": "Do not read or write document.cookie directly. Use the handoff endpoint for session-establishing state. See specs/021-embedded-login/contracts/login-page-contract.md §4.2."
+            },
+            {
+                "selector": "CallExpression[callee.object.name='localStorage']",
+                "message": "Do not persist credentials or session state to localStorage. See specs/021-embedded-login/contracts/login-page-contract.md §4.2."
+            },
+            {
+                "selector": "CallExpression[callee.object.name='sessionStorage']",
+                "message": "Do not persist credentials or session state to sessionStorage. See specs/021-embedded-login/contracts/login-page-contract.md §4.2."
+            }
+        ]
+    },
+    "overrides": [
+        {
+            "files": ["tests/**/*"],
+            "rules": {
+                "no-restricted-syntax": "off"
+            }
+        }
+    ]
+}

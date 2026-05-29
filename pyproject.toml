@@ -1,0 +1,64 @@
+[project]
+name = "okareo-mcp"
+version = "0.0.33"
+description = "Okareo MCP server for AI model evaluation"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10,<3.13"
+authors = [
+    { name = "Okareo", email = "support@okareo.com" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "mcp[cli]>=1.27",
+    "okareo>=0.0.132,<0.0.133",
+    "httpx",
+    "PyJWT[crypto]>=2.9",
+    "python-dotenv>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/okareo-ai/okareo-mcp-beta"
+Documentation = "https://docs.okareo.com/docs/mcp/introduction"
+Repository = "https://github.com/okareo-ai/okareo-mcp-beta"
+Issues = "https://github.com/okareo-ai/okareo-mcp-beta/issues"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.setuptools.package-data]
+"src" = ["templates/*.md"]
+
+[project.scripts]
+okareo-mcp = "src.server:main"
+okareo-mcp-setup = "src.setup_cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"

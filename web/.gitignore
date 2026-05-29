@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Yarn Berry artifacts. With nodeLinker: node-modules these aren't needed at
+# runtime; they regenerate from yarn.lock + .yarnrc.yml on next yarn install.
+.pnp.*
+.yarn/cache
+.yarn/install-state.gz
+.yarn/build-state.yml
+.yarn/unplugged
+.yarn/sdks
+
+# Build output
+.next/
+out/
+
+# Misc
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+*.log
+
+# Environment
+.env.local
+.env.*.local
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+
+# IDE
+.vscode/
+.idea/

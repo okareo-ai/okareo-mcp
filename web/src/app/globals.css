@@ -1,0 +1,21 @@
+/* Mantine CSS layer imports — same order as appfrontend/src/app/layout.tsx
+ * so layer precedence is identical. */
+
+@import "@mantine/core/styles.css";
+@import "@mantine/core/styles.layer.css";
+@import "@mantine/notifications/styles.css";
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+    background: linear-gradient(135deg, #f3f0ff 37%, #e7f5ff 85%);
+    min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+/* Hide focus rings for mouse users while preserving them for keyboard users.
+ * Required for WCAG 2.1 AA per FR-015. */
+:focus:not(:focus-visible) {
+    outline: none;
+}

@@ -1,0 +1,98 @@
+# Okareo MCP Server
+
+> Okareo's evaluation platform exposed as Model Context Protocol (MCP) tools. AI coding assistants and agents use these tools to create and manage scenarios, register generation models, run quality tests and multi-turn simulations, author checks, monitor voice traffic, and query evaluation analytics — directly from the editor or agent loop.
+
+The hosted (remote) MCP endpoint is `https://tools.okareo.com/mcp`. It speaks streamable-HTTP and supports two auth paths: OAuth browser sign-in (recommended; no secrets in config) and an `Authorization: Bearer <okareo-api-key>` header fallback for headless/CI clients. A local stdio install (`uvx okareo-mcp`) is also available for offline/airgapped use. See the README and docs for connection config.
+
+## Connect
+
+```json
+{
+  "mcpServers": {
+    "okareo": {
+      "type": "http",
+      "url": "https://tools.okareo.com/mcp"
+    }
+  }
+}
+```
+
+## Documentation
+
+- [Okareo MCP introduction](https://docs.okareo.com/docs/mcp/introduction): Overview, setup, and supported copilots.
+- [Okareo docs](https://docs.okareo.com): Concepts — scenarios, checks, generation models, simulations, drivers, targets, and analytics.
+- [Okareo app](https://app.okareo.com): Web UI for projects, test runs, and dashboards.
+
+## Tools — Scenarios
+
+- `save_scenario`: Save a named scenario from rows of input/result data (idempotent).
+- `list_scenarios`: List scenarios in the project, most recent first.
+- `get_scenario`: Read a scenario's metadata and all data rows by name or ID.
+- `create_scenario_version`: Create a new version of an existing scenario with updated data.
+- `preview_delete_scenario`: Preview what will be deleted before removing a scenario.
+- `delete_scenario`: Permanently delete a scenario and all related test data.
+
+## Tools — Generation Models
+
+- `list_available_llms`: Browse available LLMs from the Okareo registry.
+- `register_generation_model`: Register a generation model for testing by selecting an LLM from the registry.
+- `list_generation_models`: List all registered generation models in the project.
+- `get_generation_model`: Read detailed information about a registered generation model.
+- `update_generation_model`: Change the LLM a registered generation model points to.
+- `delete_generation_model`: Remove a registered generation model and all its related test data.
+
+## Tools — Tests & Checks
+
+- `list_checks`: List available quality checks (built-in and custom) for evaluating model outputs.
+- `run_test`: Run a quality test that evaluates a model against a scenario using specified checks.
+- `list_test_runs`: List past test runs with optional filters (model, scenario, simulation-only).
+- `get_test_run_results`: Load detailed per-row results of a test run or simulation by ID or name.
+- `get_conversation_transcript`: Retrieve the full conversation transcript for a single data point.
+- `reevaluate_test_run`: Re-score a completed test run against a (possibly different) set of checks.
+- `create_or_update_check`: Create or update a quality check by name — model-based, code-based, or audio (upsert).
+- `generate_check`: Generate a check from a natural-language description, then save it.
+- `get_check`: Retrieve a check's full configuration, including its prompt template or code.
+- `delete_check`: Permanently delete a check by name.
+
+## Tools — Simulations (Multi-Turn)
+
+- `create_or_update_target`: Create or update a Target — generation model, custom endpoint, or voice (OpenAI, Deepgram, Twilio).
+- `get_target`: Retrieve a Target's configuration by name (all types).
+- `list_targets`: List all simulation targets (voice and custom_endpoint) in the project.
+- `delete_target`: Remove a simulation target and all its related test data.
+- `create_or_update_driver`: Define a simulated user persona that will interact with your target.
+- `get_driver`: Retrieve a Driver's full configuration including the persona prompt.
+- `list_drivers`: List all Driver personas in the project.
+- `list_driver_voices`: Discover the voices, voice profiles, and languages available for voice drivers.
+- `run_simulation`: Run a multi-turn conversation evaluation (or rerun a previous one with overrides).
+- `list_simulations`: List past simulation runs with optional filters (target, scenario, limit).
+
+## Tools — Voice Monitoring
+
+- `ingest_conversations`: Submit completed voice conversations to Okareo for monitoring.
+- `connect_voice_integration`: Connect a voice provider so its traffic flows into Okareo monitoring.
+- `list_voice_integrations`: List the voice provider integrations in your project.
+- `get_voice_integration`: Retrieve a voice provider integration by ID, including its status.
+- `update_voice_integration`: Update a voice provider integration's metadata.
+- `rotate_voice_integration_secret`: Rotate a voice provider integration's secrets.
+- `delete_voice_integration`: Delete a voice provider integration by ID.
+- `get_voice_webhook_url`: Get the inbound webhook endpoint for a voice provider.
+
+## Tools — Analytics & Dashboards
+
+- `query_analytics`: Query Okareo's product analytics to understand evaluation trends.
+- `list_dashboards`: List the analytics dashboards in your project.
+- `get_dashboard`: Retrieve a dashboard's full configuration by name.
+- `save_dashboard`: Create or update an analytics dashboard by name (upsert).
+- `reorder_dashboards`: Set the display order of dashboards.
+- `delete_dashboard`: Delete a dashboard by name.
+
+## Tools — Tenant Management (remote MCP only)
+
+- `list_tenants`: List every Okareo organization you have access to in this MCP session.
+- `switch_tenant`: Change which Okareo organization subsequent tool calls operate against.
+
+## Tools — Documentation & Templates
+
+- `get_docs`: Query the Okareo documentation system for conceptual or user-legible explanations.
+- `get_templates`: Retrieve prompt templates for common Okareo patterns (works offline).

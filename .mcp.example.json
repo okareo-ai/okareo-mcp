@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "okareo": {
+      "type": "http",
+      "url": "https://tools.okareo.com/mcp"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+# gitleaks configuration for the public-mirror secret-scan guard
+# (scripts/publish-public.sh step 5). gitleaks auto-loads this file from the
+# root of the scanned tree; it ships in the curated snapshot because it is NOT
+# listed in the publish EXCLUDES.
+#
+# Purpose: suppress false positives from test fixtures that use obviously-fake
+# placeholder credentials. Real secrets never live in committed test files, so
+# allowlisting the fixture values (and the tests/ tree) keeps the guard
+# fail-closed for genuine leaks while not blocking releases on dummy data.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake placeholder credentials used in test fixtures"
+
+# Exact placeholder tokens used across the unit/integration suites. Listing
+# them explicitly (rather than only by path) means these dummy values are
+# allowed even if a fixture is ever moved out of tests/.
+regexes = [
+  '''test-api-key-12345''',
+  '''rt-test-1234567890''',
+]
+
+# The tests/ tree contains only fabricated fixtures. The real release guard is
+# the curated snapshot itself; production secrets are supplied at runtime via
+# env vars and are never committed here.
+paths = [
+  '''tests/.*''',
+]
