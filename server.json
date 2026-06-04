@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.okareo/okareo",
   "title": "Okareo",
-  "description": "Evaluate and monitor voice and text agents. Synthetic users to find edges.",
-  "version": "0.0.34",
+  "description": "Simulation, evaluation and monitoring for voice agents.",
+  "version": "0.0.35",
   "repository": {
     "url": "https://github.com/okareo-ai/okareo-mcp",
     "source": "github"

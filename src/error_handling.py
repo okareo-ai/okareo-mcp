@@ -92,12 +92,16 @@ def classify_error(exc: Exception) -> str:
         status = getattr(getattr(exc, "response", None), "status_code", 0)
         if status in (401, 403):
             return "authentication"
+        if status in (400, 422):
+            return "validation"
         return "server_error"
 
     if exc_type == "UnexpectedStatus":
         status = getattr(exc, "status_code", 0)
         if status in (401, 403):
             return "authentication"
+        if status in (400, 422):
+            return "validation"
         return "server_error"
 
     # Validation: ValueError from input checking
@@ -118,6 +122,55 @@ _SUGGESTIONS = {
 }
 
 
+_DETAIL_MAX_LEN = 600
+
+
+def _extract_http_detail(exc: Exception) -> str | None:
+    """Pull the backend error reason out of an HTTP error response body.
+
+    FastAPI returns ``{"detail": "..."}`` for raised HTTPExceptions and
+    ``{"detail": [{"loc": [...], "msg": "...", "type": "..."}]}`` for request
+    validation failures. Summarize either into a short string. Returns ``None``
+    when no usable detail is present. Never raises.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    try:
+        body = response.json()
+    except Exception:
+        text = getattr(response, "text", None)
+        return text.strip()[:_DETAIL_MAX_LEN] if text else None
+
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if detail is None:
+        return None
+    if isinstance(detail, str):
+        return detail[:_DETAIL_MAX_LEN]
+    if isinstance(detail, list):
+        parts: list[str] = []
+        for item in detail:
+            if isinstance(item, dict):
+                loc = item.get("loc") or []
+                field = ".".join(str(p) for p in loc[1:]) or ".".join(
+                    str(p) for p in loc
+                )
+                msg = item.get("msg") or item.get("type") or "invalid"
+                parts.append(f"{field}: {msg}" if field else str(msg))
+            else:
+                parts.append(str(item))
+        return "; ".join(parts)[:_DETAIL_MAX_LEN] if parts else None
+    return str(detail)[:_DETAIL_MAX_LEN]
+
+
+def _http_status(exc: Exception) -> int | None:
+    """Return the HTTP status from an SDK or httpx error, if any."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status
+
+
 def _build_message(exc: Exception, category: str) -> str:
     """Build a user-readable error message from the exception."""
     exc_type = type(exc).__name__
@@ -132,15 +185,21 @@ def _build_message(exc: Exception, category: str) -> str:
             return "Invalid API key format."
         return "Authentication failed."
 
+    status = _http_status(exc)
+    detail = _extract_http_detail(exc)
+
     if category == "validation":
+        # ValueError from local input checks carries its own message; HTTP
+        # 400/422 from the backend carries the reason in the response body.
+        if status is not None:
+            base = f"The Okareo API rejected the request (HTTP {status})."
+            return f"{base} {detail}" if detail else base
         return str(exc)
 
     # server_error
-    status = getattr(exc, "status_code", None)
-    if status is None:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
     if status:
-        return f"The Okareo API returned an error (HTTP {status})."
+        base = f"The Okareo API returned an error (HTTP {status})."
+        return f"{base} {detail}" if detail else base
 
     return f"An unexpected error occurred: {exc_type}"
 

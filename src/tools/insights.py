@@ -23,15 +23,68 @@ from src.okareo_client import (
     resolve_project_id,
 )
 
+# Supported relative look-back windows (the backend ``TimeRange`` enum). Both
+# dashboards and analytics queries accept these enum strings — NOT objects.
+TIME_RANGES: tuple[str, ...] = (
+    "LAST_HOUR",
+    "LAST_24_HOURS",
+    "LAST_7_DAYS",
+    "LAST_14_DAYS",
+    "LAST_30_DAYS",
+    "LAST_90_DAYS",
+)
+
+# Analytics queries require a time window; default to this when the caller
+# supplies neither ``time_range`` nor ``time_dimensions``.
+DEFAULT_ANALYTICS_TIME_RANGE = "LAST_30_DAYS"
+
+
+def _validate_time_range(time_range: Optional[str]) -> Optional[str]:
+    """Return an error message if ``time_range`` is set but unsupported."""
+    if time_range is not None and time_range not in TIME_RANGES:
+        return (
+            f"Unsupported time_range '{time_range}'. "
+            f"Supported values: {', '.join(TIME_RANGES)}."
+        )
+    return None
+
+
+def _dashboards_from_response(resp):
+    """Extract the dashboard list from a ``GET /v0/dashboards`` response.
+
+    The backend wraps the list in a ``DashboardListResponse`` (``{"items":
+    [...]}``); a bare list is tolerated for forward/backward compatibility.
+    """
+    if isinstance(resp, dict):
+        items = resp.get("items")
+        return items if isinstance(items, list) else []
+    if isinstance(resp, list):
+        return resp
+    return []
+
 
 def _find_dashboard_by_name(dashboards, name: str):
-    """Return the dashboard dict whose name matches, or None."""
+    """Return the dashboard dict whose name matches, or None.
+
+    When multiple dashboards share the name (legacy duplicates created before
+    the upsert lookup was fixed), the most-recently-modified one is returned so
+    the choice is deterministic; no automatic de-duplication is performed.
+    """
     if not isinstance(dashboards, list):
         return None
-    for d in dashboards:
-        if isinstance(d, dict) and d.get("name") == name:
-            return d
-    return None
+    matches = [
+        d for d in dashboards if isinstance(d, dict) and d.get("name") == name
+    ]
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    return max(
+        matches,
+        key=lambda d: (
+            d.get("time_modified") or d.get("time_created") or ""
+        ),
+    )
 
 
 def register_tools(mcp: FastMCP) -> None:
@@ -51,25 +104,43 @@ def register_tools(mcp: FastMCP) -> None:
         dimensions: Optional[list[str]] = None,
         cube: Optional[str] = None,
         filters: Optional[list[dict]] = None,
-        time_range: Optional[dict] = None,
+        time_range: Optional[str] = None,
+        time_dimensions: Optional[list[dict]] = None,
         include_metadata: bool = False,
     ) -> str:
         """Query Okareo's product analytics to understand evaluation trends.
 
         Answers questions like "how is my evaluation quality trending" by
-        aggregating measures across dimensions.
+        aggregating measures across dimensions over a time window.
 
         Args:
-            measures: Metrics to aggregate (e.g. ["test_runs.count"]). Required.
-            dimensions: Optional group-by fields (e.g. ["test_runs.day"]).
-            cube: Optional analytics cube name to scope the query.
-            filters: Optional list of filter objects.
-            time_range: Optional time-range object.
+            measures: Metrics to aggregate. Required. For the ``check_trend``
+                cube: avg_check_value, issue_rate, error_rate, datapoint_count,
+                issue_count, error_count, test_run_count, avg_latency, sum_cost,
+                input_token_count, output_token_count.
+            dimensions: Optional group-by fields (e.g. ["check.name"],
+                ["target.name"], ["provider"]).
+            cube: Optional analytics cube name (defaults to ``check_trend``,
+                currently the only cube).
+            filters: Optional list of filter objects
+                ``{"member": ..., "operator": ..., "values": [...]}``.
+            time_range: Optional look-back window — one of LAST_HOUR,
+                LAST_24_HOURS, LAST_7_DAYS, LAST_14_DAYS, LAST_30_DAYS,
+                LAST_90_DAYS. If neither time_range nor time_dimensions is
+                given, defaults to LAST_30_DAYS (the analytics API requires a
+                time window).
+            time_dimensions: Optional time bucketing — a list with at most one
+                entry, e.g. [{"dimension": "test_run.start_time",
+                "granularity": "day"}] (granularity: hour, day, or week).
             include_metadata: When true, also return the available cubes,
                 dimensions, and measures so the query can be refined.
         """
         if not measures or not isinstance(measures, list):
             return json.dumps({"error": "measures must be a non-empty list."})
+
+        tr_error = _validate_time_range(time_range)
+        if tr_error:
+            return json.dumps({"error": tr_error})
 
         try:
             okareo = get_okareo_client()
@@ -87,6 +158,12 @@ def register_tools(mcp: FastMCP) -> None:
             except Exception as e:
                 return format_tool_error(e)
 
+        # The analytics API requires exactly one of time_range or a single
+        # time_dimension; default to a sensible window when the caller gives
+        # neither so "how is my quality trending" works without manual setup.
+        if time_range is None and not time_dimensions:
+            time_range = DEFAULT_ANALYTICS_TIME_RANGE
+
         body: dict = {"project_id": str(project_id), "measures": measures}
         if dimensions:
             body["dimensions"] = dimensions
@@ -96,6 +173,8 @@ def register_tools(mcp: FastMCP) -> None:
             body["filters"] = filters
         if time_range:
             body["time_range"] = time_range
+        if time_dimensions:
+            body["time_dimensions"] = time_dimensions
 
         try:
             result = okareo_api_request(
@@ -139,7 +218,7 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
-        dashboards = dashboards if isinstance(dashboards, list) else []
+        dashboards = _dashboards_from_response(dashboards)
         total = len(dashboards)
         if limit and limit > 0:
             dashboards = dashboards[:limit]
@@ -178,7 +257,9 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
-        match = _find_dashboard_by_name(dashboards, name)
+        match = _find_dashboard_by_name(
+            _dashboards_from_response(dashboards), name
+        )
         if match is None:
             return json.dumps({
                 "error": f"Dashboard '{name}' not found. "
@@ -208,7 +289,7 @@ def register_tools(mcp: FastMCP) -> None:
         name: str,
         panels: Optional[list[dict]] = None,
         description: Optional[str] = None,
-        time_range: Optional[dict] = None,
+        time_range: Optional[str] = None,
     ) -> str:
         """Create or update an analytics dashboard by name (upsert).
 
@@ -217,12 +298,53 @@ def register_tools(mcp: FastMCP) -> None:
 
         Args:
             name: Dashboard name — the upsert key.
-            panels: Optional list of panel definitions.
+            panels: Optional list of panel definitions. Each panel is an object:
+
+                - ``title`` (str, required): panel heading.
+                - ``chart_type`` (str, required): one of ``line``, ``bar``,
+                  ``composed``, ``area``, ``radar``, ``stat``, ``table``.
+                - ``query`` (object, required): what to chart —
+                  ``{"cube": "check_trend", "measures": [...],
+                  "dimensions": [...], "filters": [...],
+                  "time_dimensions": [...], "order": {...}}``. ``measures`` is
+                  required; everything else is optional. ``cube`` defaults to
+                  ``check_trend``. The dashboard ``time_range`` applies to all
+                  panels — panels do NOT carry their own time range.
+                - ``layout`` (object, required): grid placement
+                  ``{"x": >=0, "y": >=0, "w": >=1, "h": >=1}`` (integers).
+                - ``table_config`` (object, optional): ONLY for
+                  ``chart_type == "table"``.
+
+                ``check_trend`` measures: ``avg_check_value``, ``issue_rate``,
+                ``error_rate``, ``datapoint_count``, ``issue_count``,
+                ``error_count``, ``test_run_count``, ``avg_latency``,
+                ``sum_cost``, ``input_token_count``, ``output_token_count``.
+                ``check_trend`` dimensions: ``check.name``, ``check.id``,
+                ``target.name``, ``target.id``, ``scenario.name``,
+                ``scenario.id``, ``test_run.id``, ``test_run.type``,
+                ``test_run.is_latest_for_target``, ``source``, ``provider``,
+                ``request_model_name``, ``response_model_name``, ``tag``.
+                Use ``query_analytics(include_metadata=True)`` for the
+                authoritative, current set.
+
+                Example panel::
+
+                    {"title": "Avg Check Value by Check", "chart_type": "bar",
+                     "query": {"measures": ["avg_check_value"],
+                               "dimensions": ["check.name"]},
+                     "layout": {"x": 0, "y": 0, "w": 6, "h": 4}}
             description: Optional dashboard description.
-            time_range: Optional default time-range object.
+            time_range: Optional default look-back window for the whole
+                dashboard. One of: LAST_HOUR, LAST_24_HOURS, LAST_7_DAYS,
+                LAST_14_DAYS, LAST_30_DAYS, LAST_90_DAYS. Defaults to
+                LAST_90_DAYS when omitted.
         """
         if not name or not name.strip():
             return json.dumps({"error": "name is required."})
+
+        tr_error = _validate_time_range(time_range)
+        if tr_error:
+            return json.dumps({"error": tr_error})
 
         try:
             okareo = get_okareo_client()
@@ -238,7 +360,9 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
-        existing = _find_dashboard_by_name(dashboards, name)
+        existing = _find_dashboard_by_name(
+            _dashboards_from_response(dashboards), name
+        )
         body: dict = {"name": name}
         if panels is not None:
             body["panels"] = panels
@@ -303,7 +427,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         name_to_id = {
             d.get("name"): d.get("id")
-            for d in (dashboards or [])
+            for d in _dashboards_from_response(dashboards)
             if isinstance(d, dict)
         }
         ordered_ids: list = []
@@ -361,7 +485,9 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
-        match = _find_dashboard_by_name(dashboards, name)
+        match = _find_dashboard_by_name(
+            _dashboards_from_response(dashboards), name
+        )
         if match is None:
             return json.dumps({
                 "error": f"Dashboard '{name}' not found. "
