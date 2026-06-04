@@ -17,6 +17,7 @@ from typing import Optional
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.analytics import is_truthy
 from src.error_handling import format_tool_error
@@ -67,7 +68,15 @@ def _load_template(template_name: str) -> str:
 def register_tools(mcp: FastMCP) -> None:
     """Register documentation and template tools with the FastMCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Query Okareo Documentation",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
     def get_docs(
         query: str,
         mode: str,
@@ -164,7 +173,15 @@ def register_tools(mcp: FastMCP) -> None:
             "count": len(entries),
         })
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Okareo Templates",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def get_templates(
         template_name: Optional[str] = None,
     ) -> str:

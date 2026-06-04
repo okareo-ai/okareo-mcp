@@ -179,3 +179,80 @@ class TestReevaluateTestRun:
 
         assert "error" in result
         assert "not found" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# run_test tool — faux-async handoff (spec 025, FR-008)
+# ---------------------------------------------------------------------------
+
+class TestRunTestToolHandoff:
+    def _wire(self, mock_client, mock_resolve, run_test_impl):
+        """Common okareo/scenario wiring; run_test_impl drives mut.run_test."""
+        scenario = SimpleNamespace(name="my-scenario", scenario_id="sid")
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [scenario]
+
+        okareo = MagicMock()
+        okareo.api_key = "k"
+        mut = MagicMock()
+        mut.run_test.side_effect = run_test_impl
+        okareo.get_model.return_value = mut
+        okareo.get_all_checks.return_value = [_check_brief("coherence", "id-coh")]
+        mock_client.return_value = okareo
+        mock_resolve.return_value = "proj"
+        return okareo, mut, scen_mod
+
+    @patch("src.tools.simulations._find_runs", lambda *a, **k: {})
+    @patch("src.tools.tests.resolve_project_id")
+    @patch("src.tools.tests.get_okareo_client")
+    def test_finished_inline_returns_handoff(self, mock_client, mock_resolve):
+        from okareo_api_client.api import default as _default_pkg
+
+        result = SimpleNamespace(
+            id="tr-1", name="my-scenario-my-model", app_link="http://app/tr-1"
+        )
+        _okareo, mut, scen_mod = self._wire(
+            mock_client, mock_resolve, lambda **kw: result
+        )
+        tools = _tests_tools()
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ):
+            out = json.loads(tools["run_test"](
+                scenario_name="my-scenario",
+                model_name="my-model",
+                checks=["coherence"],
+            ))
+
+        assert out["status"] == "finished"
+        assert out["test_run_id"] == "tr-1"
+        assert out["type"] == "NL_GENERATION"
+        assert out["model"] == "my-model"
+        assert out["scenario"] == "my-scenario"
+        # No conversation-transcript hint on a single-turn test.
+        assert "get_conversation_transcript" not in out["message"]
+        mut.run_test.assert_called_once()
+
+    @patch("src.tools.simulations._find_runs", lambda *a, **k: {})
+    @patch("src.tools.tests.resolve_project_id")
+    @patch("src.tools.tests.get_okareo_client")
+    def test_failure_surfaces_inline(self, mock_client, mock_resolve):
+        from okareo_api_client.api import default as _default_pkg
+
+        def _boom(**kw):
+            raise RuntimeError("backend rejected the run")
+
+        _okareo, mut, scen_mod = self._wire(mock_client, mock_resolve, _boom)
+        tools = _tests_tools()
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ):
+            out = json.loads(tools["run_test"](
+                scenario_name="my-scenario",
+                model_name="my-model",
+                checks=["coherence"],
+            ))
+
+        assert "error" in out

@@ -11,6 +11,7 @@ import json
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.error_handling import format_tool_error
 from src.okareo_client import (
@@ -28,7 +29,15 @@ _VOICE_PROVIDERS = ("retell", "twilio", "vapi", "elevenlabs")
 def register_tools(mcp: FastMCP) -> None:
     """Register voice monitoring and integration tools with the FastMCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Ingest Conversations",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
     def ingest_conversations(
         conversations: list[dict],
         project_id: Optional[str] = None,
@@ -127,7 +136,15 @@ def register_tools(mcp: FastMCP) -> None:
     # The Okareo API identifies integrations by id (there is no name field);
     # tools therefore take an integration_id rather than a name.
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Connect Voice Integration",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
     def connect_voice_integration(
         provider: str,
         webhook_auth_type: str,
@@ -182,7 +199,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": f"Voice integration for '{provider}' created.",
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Voice Integrations",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
     def list_voice_integrations(limit: int = 20) -> str:
         """List the voice provider integrations in your Okareo project.
 
@@ -214,7 +239,15 @@ def register_tools(mcp: FastMCP) -> None:
             "total": total,
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Voice Integration",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
     def get_voice_integration(integration_id: str) -> str:
         """Retrieve a voice provider integration by id, including its status.
 
@@ -233,7 +266,15 @@ def register_tools(mcp: FastMCP) -> None:
             return format_tool_error(e)
         return json.dumps({"integration": result}, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Update Voice Integration",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
     def update_voice_integration(integration_id: str, metadata: dict) -> str:
         """Update a voice provider integration's metadata.
 
@@ -257,7 +298,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": "Voice integration updated.",
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Rotate Voice Integration Secret",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
     def rotate_voice_integration_secret(
         integration_id: str, secrets: dict
     ) -> str:
@@ -287,7 +336,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": "Voice integration secrets rotated.",
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Delete Voice Integration",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
     def delete_voice_integration(integration_id: str) -> str:
         """Delete a voice provider integration by id.
 
@@ -310,7 +367,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": "Voice integration deleted.",
         })
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Voice Webhook URL",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
     def get_voice_webhook_url(provider: str, public_id: Optional[str] = None) -> str:
         """Get the inbound webhook endpoint for a voice provider.
 

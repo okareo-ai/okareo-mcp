@@ -12,6 +12,7 @@ import json
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.error_handling import format_tool_error
 from src.okareo_client import get_okareo_client
@@ -82,7 +83,15 @@ def _check_tags(obj):
 def register_tools(mcp: FastMCP) -> None:
     """Register all check management tools with the FastMCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Create or Update Check",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def create_or_update_check(
         name: str,
         description: str,
@@ -250,7 +259,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": f"Check '{name}' saved successfully.",
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Generate Check",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
     def generate_check(
         name: str,
         description: str,
@@ -363,7 +380,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": f"Check '{name}' generated and saved successfully.",
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Check",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def get_check(name: str, version: Optional[int] = None) -> str:
         """Retrieve the full configuration of a check by name, including its prompt template or code contents.
 
@@ -426,7 +451,15 @@ def register_tools(mcp: FastMCP) -> None:
             "time_created": str(_get_attr(detail, "time_created", "")),
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Delete Check",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
     def delete_check(name: str) -> str:
         """Permanently delete a check by name.
 

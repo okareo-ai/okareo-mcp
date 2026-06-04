@@ -104,6 +104,7 @@ def test_instructions_tool_names_valid():
         "app_link",
         "model_metrics",
         "scenario_index",
+        "estimated_runtime",
         # Tenant-selection response fields + error codes (not tool names)
         "tenant_id",
         "active_tenant_id",

@@ -1,7 +1,7 @@
 """Integration: run_simulation augmented path (spec 023-tool-fixes US4, US5, US8).
 
 Mocks the okareo SDK boundary and verifies:
-- Each of the 5 non-noise strategies produces a submit_test call carrying the
+- Each of the 5 non-noise strategies produces a run_test call carrying the
   augmentation block on simulation_params (T017).
 - Composing noise with a non-noise strategy works; two non-noise strategies
   are rejected before any SDK call (T022).
@@ -106,7 +106,7 @@ def _mock_okareo_for_augmented_path(target=None, driver=None):
     mut_result.id = "test-run-id-xyz"
     mut_result.name = "augmented-run"
     mut_result.app_link = "https://app.okareo.com/test_runs/xyz"
-    mut_instance.submit_test.return_value = mut_result
+    mut_instance.run_test.return_value = mut_result
     return okareo, mut_instance
 
 
@@ -115,7 +115,7 @@ def _mock_okareo_for_augmented_path(target=None, driver=None):
 # ---------------------------------------------------------------------------
 
 class TestEachStrategy:
-    """Verify that each augmentation strategy reaches the SDK's submit_test."""
+    """Verify that each augmentation strategy reaches the SDK's run_test."""
 
     @pytest.mark.parametrize(
         "strategy_name,strategy_config",
@@ -135,7 +135,7 @@ class TestEachStrategy:
     @patch("okareo.model_under_test.ModelUnderTest")
     @patch("src.tools.simulations.resolve_project_id")
     @patch("src.tools.simulations.get_okareo_client")
-    def test_strategy_reaches_submit_test(
+    def test_strategy_reaches_run_test(
         self, mock_client, mock_project, mock_mut_class, strategy_name,
         strategy_config, tools, mock_get_scenario_sets,
     ):
@@ -158,8 +158,8 @@ class TestEachStrategy:
         assert result["test_run_id"] == "test-run-id-xyz"
 
         # Verify the augmentation block was forwarded.
-        mut_instance.submit_test.assert_called_once()
-        kwargs = mut_instance.submit_test.call_args.kwargs
+        mut_instance.run_test.assert_called_once()
+        kwargs = mut_instance.run_test.call_args.kwargs
         sim_params = kwargs["simulation_params"]
         emitted = sim_params.to_dict()
         assert "augmentation" in emitted
@@ -198,8 +198,8 @@ class TestComposition:
         ))
 
         assert "error" not in result, result
-        mut_instance.submit_test.assert_called_once()
-        emitted = mut_instance.submit_test.call_args.kwargs["simulation_params"].to_dict()
+        mut_instance.run_test.assert_called_once()
+        emitted = mut_instance.run_test.call_args.kwargs["simulation_params"].to_dict()
         assert "barge_in" in emitted["augmentation"]
         assert "noise" in emitted["augmentation"]
 
@@ -230,7 +230,7 @@ class TestComposition:
         assert set(result["conflicting_strategies"]) == {"cap", "secondary_speaker"}
         # SDK / mut MUST NOT be touched (FR-026).
         okareo.get_target_by_name.assert_not_called()
-        mut_instance.submit_test.assert_not_called()
+        mut_instance.run_test.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +263,7 @@ class TestVoiceTargetPreflight:
         assert "error" in result
         assert "voice Targets" in result["error"]
         assert result["target_type"] == "custom_endpoint"
-        mut_instance.submit_test.assert_not_called()
+        mut_instance.run_test.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +294,7 @@ class TestRangePreflight:
         assert "[0.0, 1.0]" in result["error"]
         # No network calls at all (FR-026).
         okareo.get_target_by_name.assert_not_called()
-        mut_instance.submit_test.assert_not_called()
+        mut_instance.run_test.assert_not_called()
 
     @patch("okareo.model_under_test.ModelUnderTest")
     @patch("src.tools.simulations.get_okareo_client")
@@ -318,7 +318,7 @@ class TestRangePreflight:
         assert result["strategy"] == "echo"
         assert "known" in result
         assert "cap" in result["known"]
-        mut_instance.submit_test.assert_not_called()
+        mut_instance.run_test.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +347,7 @@ class TestPeerKnobs:
         ))
 
         assert "error" not in result, result
-        emitted = mut_instance.submit_test.call_args.kwargs[
+        emitted = mut_instance.run_test.call_args.kwargs[
             "simulation_params"].to_dict()
         assert emitted["silence_timeout_ms"] == 8000
 

@@ -30,6 +30,7 @@ import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.auth import refresh_token_cache, tenant_state
 from src.auth.context import get_session_credential_optional
@@ -86,7 +87,15 @@ def _read_tenant_id_from_jwt(jwt_string: str) -> str | None:
 def register_tools(mcp: FastMCP) -> None:
     """Register list_tenants and switch_tenant with the FastMCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Tenants",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     async def list_tenants() -> str:
         """List every Okareo organization you have access to in this MCP session.
 
@@ -141,7 +150,15 @@ def register_tools(mcp: FastMCP) -> None:
             }
         )
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Switch Tenant",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     async def switch_tenant(tenant_id: str) -> str:
         """Change which Okareo organization subsequent tool calls operate against.
 

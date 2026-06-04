@@ -243,3 +243,15 @@ Then use `"command": "okareo-mcp"` instead of `"command": "uvx"` with `"args": [
 | `pip install` fails on Python 3.13+ | Okareo SDK requires Python <3.13 | Use Python 3.10–3.12 |
 | Copilot can't connect (Docker) | Wrong URL | Ensure URL ends with `/sse` and port matches |
 | Cursor doesn't pick up API key | Cursor launched from Dock, not terminal | Launch Cursor from terminal: `cursor .` |
+
+---
+
+## Contributing
+
+This repository is a curated public mirror; the canonical source is maintained by Okareo. We welcome issues and consider community pull requests — see [CONTRIBUTING.md](CONTRIBUTING.md) for how proposed changes are reviewed and ported.
+
+## License & Trademarks
+
+The Okareo MCP server source code is licensed under the [Apache License 2.0](LICENSE) (see also [NOTICE](NOTICE)).
+
+"Okareo", the Okareo logo, and Okareo product names are trademarks of Okareo, Inc. and are **not** covered by the Apache 2.0 license. See [TRADEMARK.md](TRADEMARK.md) for permitted use.

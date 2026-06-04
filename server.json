@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.okareo/okareo",
   "title": "Okareo",
-  "description": "Agent simulation, evaluation, and monitoring for voice and text agents. Generate test scenarios from your codebase, run multi-turn simulations against your agent, and gate PRs on real conversation quality.",
-  "version": "0.0.33",
+  "description": "Evaluate and monitor voice and text agents. Synthetic users to find edges.",
+  "version": "0.0.34",
   "repository": {
     "url": "https://github.com/okareo-ai/okareo-mcp",
     "source": "github"

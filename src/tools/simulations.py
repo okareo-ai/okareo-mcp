@@ -15,10 +15,12 @@ Provides nine MCP tools for the multi-turn simulation workflow:
 """
 
 import json
+import os
 import re
 from typing import Optional
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 
 from src.error_handling import format_tool_error
 from src.okareo_client import (
@@ -226,10 +228,226 @@ def _profile_name_set(profiles) -> set:
     return names
 
 
+# --- Long-running simulation buffering (spec 025-long-running-simulations) ---
+# run_test executes synchronously on the backend and *survives client
+# disconnect*: the backend handler runs to completion in its own threadpool
+# thread regardless of the caller, and the run is finalized inside that still-
+# open request (validated empirically; see specs/025-long-running-simulations/
+# research.md). So we run the blocking submission in a background thread and,
+# after giving the run a moment to register, look it up via find_test_runs to
+# hand the co-pilot a pollable run id — a faux-async handoff that keeps the tool
+# call well under the client timeout while the run finishes on its own.
+
+_SIM_BUFFER_SECONDS_DEFAULT = 25
+_SIM_POLL_INTERVAL_SECONDS = 2.0
+
+
+def _sim_buffer_seconds() -> float:
+    """Buffer window (seconds) to wait inline before handing off. Tunable via
+    OKAREO_SIM_BUFFER_SECONDS; kept safely under the co-pilot tool-call timeout."""
+    raw = os.environ.get("OKAREO_SIM_BUFFER_SECONDS", "").strip()
+    if raw:
+        try:
+            val = float(raw)
+            if val >= 0:
+                return val
+        except ValueError:
+            pass
+    return float(_SIM_BUFFER_SECONDS_DEFAULT)
+
+
+def _estimate_runtime_seconds(row_count, max_turns, repeats, is_voice) -> int:
+    """Rough, advisory wall-clock estimate for a simulation run.
+
+    Voice runs are materially slower per turn than text. Directional only —
+    used to set co-pilot expectations / polling cadence, never to gate results.
+    """
+    conversations = max(1, int(row_count or 1)) * max(1, int(repeats or 1))
+    per_turn = 18 if is_voice else 4
+    per_conversation = max(1, int(max_turns or 1)) * per_turn + 6
+    backend_concurrency = 2 if is_voice else 4
+    return int(per_conversation * conversations / backend_concurrency)
+
+
+def _format_duration(seconds) -> str:
+    seconds = max(1, int(seconds))
+    if seconds < 90:
+        return f"~{seconds}s"
+    return f"~{round(seconds / 60)} min"
+
+
+def _find_runs(okareo, project_id, scenario_set_id, types) -> dict:
+    """Best-effort ``{run_id: {"name":, "app_link":}}`` for runs of a scenario,
+    filtered to the given test-run ``types``. Never raises — returns ``{}`` on any
+    error so discovery failures degrade to a handoff without an id rather than
+    breaking the tool."""
+    try:
+        from okareo_api_client.errors import UnexpectedStatus
+        from okareo_api_client.models.general_find_payload import GeneralFindPayload
+
+        payload = GeneralFindPayload(
+            project_id=project_id,
+            scenario_set_id=scenario_set_id,
+            types=list(types),
+            return_model_metrics=False,
+        )
+        try:
+            runs = find_test_runs(okareo, payload)
+        except UnexpectedStatus as ue:
+            runs = json.loads(ue.content) if ue.status_code == 200 else None
+        out: dict = {}
+        if runs and not isinstance(runs, Exception):
+            for r in runs:
+                rid = r.get("id") if isinstance(r, dict) else _get_attr(r, "id")
+                if not rid:
+                    continue
+                out[str(rid)] = {
+                    "name": r.get("name") if isinstance(r, dict) else _get_attr(r, "name"),
+                    "app_link": (
+                        r.get("app_link") if isinstance(r, dict)
+                        else _get_attr(r, "app_link")
+                    ) or "",
+                }
+        return out
+    except Exception:
+        return {}
+
+
+def _buffered_submit(
+    submit_thunk, *, okareo, project_id, scenario_set_id, name, types=None
+):
+    """Run a blocking run/simulation submission in a background thread; return
+    early as a faux-async handoff if it exceeds the buffer window.
+
+    ``types`` filters run discovery (defaults to MULTI_TURN for simulations).
+
+    Returns ``(status, payload, run_id, app_link)``:
+      - ``("finished", result, run_id, app_link)`` — completed within the window
+      - ``("running",  None,   run_id, app_link)`` — handed off, still running
+      - ``("failed",   exception, run_id, app_link)`` — raised before the window
+    """
+    import threading
+    import time
+
+    if types is None:
+        from okareo_api_client.models.test_run_type import TestRunType
+        types = [TestRunType.MULTI_TURN]
+
+    holder: dict = {}
+
+    def _runner():
+        try:
+            holder["result"] = submit_thunk()
+        except BaseException as exc:  # capture everything to surface inline
+            holder["error"] = exc
+
+    # Snapshot existing runs first so the newly created one is identifiable.
+    pre_existing = set(
+        _find_runs(okareo, project_id, scenario_set_id, types).keys()
+    )
+
+    thread = threading.Thread(
+        target=_runner, name=f"okareo-sim-{name}"[:64], daemon=True
+    )
+    thread.start()
+
+    deadline = time.monotonic() + _sim_buffer_seconds()
+    run_id = None
+    app_link = ""
+
+    while True:
+        # Returns as soon as the run finishes, else after one poll interval.
+        thread.join(timeout=_SIM_POLL_INTERVAL_SECONDS)
+        if not thread.is_alive():
+            break
+        if run_id is None:
+            current = _find_runs(okareo, project_id, scenario_set_id, types)
+            new_ids = [rid for rid in current if rid not in pre_existing]
+            match = [rid for rid in new_ids if current[rid].get("name") == name]
+            chosen = match[0] if match else (new_ids[0] if len(new_ids) == 1 else None)
+            if chosen:
+                run_id = chosen
+                app_link = current[chosen].get("app_link", "")
+        if time.monotonic() >= deadline:
+            break
+
+    if not thread.is_alive():
+        if "error" in holder:
+            return ("failed", holder["error"], run_id, app_link)
+        return ("finished", holder["result"], run_id, app_link)
+    return ("running", None, run_id, app_link)
+
+
+def _build_handoff_response(
+    status, result, run_id, app_link, *,
+    name, project_id, estimate_seconds, based_on_run_id, extra,
+    noun="Simulation", transcript_hint=True,
+):
+    """Assemble the run/simulation response for a finished or running handoff.
+
+    ``noun`` and ``transcript_hint`` adapt the human message for the multi-turn
+    simulation tool vs. the single-turn test tool.
+    """
+    if status == "finished":
+        rid = _get_attr(result, "id", "") or run_id or ""
+        finished_msg = (
+            f"{noun} complete. Retrieve scores with get_test_run_results "
+            "using the test_run_id"
+        )
+        finished_msg += (
+            " (full transcripts via get_conversation_transcript)."
+            if transcript_hint else "."
+        )
+        response = {
+            "test_run_id": rid,
+            "name": _get_attr(result, "name", name),
+            "app_link": _get_attr(result, "app_link", "") or app_link,
+            "status": "finished",
+            "message": finished_msg,
+        }
+    else:  # running — faux-async handoff
+        link = app_link or (
+            f"https://app.okareo.com/project/{project_id}/eval/{run_id}"
+            if run_id else ""
+        )
+        response = {
+            "test_run_id": run_id or "",
+            "name": name,
+            "app_link": link,
+            "status": "running",
+            "message": (
+                f"{noun} started successfully and is still running; it will "
+                "continue to completion on its own. Poll get_test_run_results "
+                "with the test_run_id for status and scores, or open the app_link."
+            ),
+        }
+        if estimate_seconds:
+            response["estimated_runtime"] = _format_duration(estimate_seconds)
+            response["estimated_runtime_seconds"] = int(estimate_seconds)
+        if not run_id:
+            response["message"] += (
+                " The run id was not confirmed within the buffer window; use "
+                "list_simulations (most recent) to locate it by name."
+            )
+    if extra:
+        response.update(extra)
+    if based_on_run_id:
+        response["based_on_run_id"] = based_on_run_id
+    return response
+
+
 def register_tools(mcp: FastMCP) -> None:
     """Register all simulation tools with the FastMCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Create or Update Target",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def create_or_update_target(
         name: str,
         type: str,
@@ -613,7 +831,15 @@ def register_tools(mcp: FastMCP) -> None:
             response["sensitive_fields_count"] = len(all_sensitive)
         return json.dumps(response, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Target",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def get_target(name: str) -> str:
         """Check the current configuration of a test target.
 
@@ -754,7 +980,15 @@ def register_tools(mcp: FastMCP) -> None:
             ),
         })
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Targets",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def list_targets() -> str:
         """Browse all simulation targets available in this project.
 
@@ -835,7 +1069,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         return json.dumps({"targets": result, "count": len(result)}, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Delete Target",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
     def delete_target(name: str) -> str:
         """Remove a simulation target and all its related test data.
 
@@ -889,7 +1131,15 @@ def register_tools(mcp: FastMCP) -> None:
             ),
         })
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Create or Update Driver",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def create_or_update_driver(
         name: str,
         prompt_template: str,
@@ -1004,7 +1254,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": f"Driver '{name}' saved.",
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Driver",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def get_driver(name: str) -> str:
         """Retrieve a driver persona you've already configured.
 
@@ -1053,7 +1311,15 @@ def register_tools(mcp: FastMCP) -> None:
             "language": _get_attr(result, "language"),
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Drivers",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def list_drivers() -> str:
         """See what driver personas are available in this project.
 
@@ -1114,7 +1380,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         return json.dumps({"drivers": result, "count": len(result)}, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Driver Voices",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def list_driver_voices() -> str:
         """Discover the voices, voice profiles, and languages available for
         configuring voice-capable drivers.
@@ -1137,7 +1411,15 @@ def register_tools(mcp: FastMCP) -> None:
             "voice_profile_count": len(catalog["voice_profiles"]),
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Run Simulation",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
     def run_simulation(
         name: str,
         scenario_name: Optional[str] = None,
@@ -1159,9 +1441,14 @@ def register_tools(mcp: FastMCP) -> None:
 
         Combines a Target (the system under test), a Driver (the simulated user),
         and a Scenario (the test cases) to generate realistic multi-turn conversations
-        and evaluate them with quality checks. Runs synchronously and returns aggregate
-        results. Use get_test_run_results with the returned test_run_id for full
-        conversation transcripts.
+        and evaluate them with quality checks.
+
+        Returns promptly so the call never times out on long runs. Short runs that
+        finish within the buffer window return ``status: "finished"`` with results
+        ready; longer runs return ``status: "running"`` with the ``test_run_id``,
+        ``app_link``, and an ``estimated_runtime`` — the run continues to completion
+        on its own. In both cases, poll get_test_run_results with the returned
+        test_run_id for scores, and get_conversation_transcript for transcripts.
 
         To rerun a previous simulation — keeping its configuration but changing one or
         more parameters — pass based_on_run_id with the original run's ID and supply
@@ -1419,7 +1706,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         # The SDK's Simulation dataclass does not carry `augmentation` or
         # `silence_timeout_ms`. When either is set, bypass okareo.run_simulation
-        # and call mut.submit_test directly with an AugmentedSimulation that
+        # and call mut.run_test directly with an AugmentedSimulation that
         # emits the extras through the openapi client's additional_properties
         # (see specs/023-tool-fixes/research.md R1, R4).
         use_augmented_path = (
@@ -1522,24 +1809,30 @@ def register_tools(mcp: FastMCP) -> None:
                     mut=dummy_response,
                     models={target_dict["type"]: target_dict},
                 )
-                result = mut.submit_test(
-                    scenario=resolved_scenario,
-                    name=name,
-                    api_key=okareo.api_key,
-                    api_keys=key_registry or None,
-                    metrics_kwargs=None,
-                    test_run_type=TestRunType.MULTI_TURN,
-                    calculate_metrics=True,
-                    checks=checks or [],
-                    simulation_params=sim_params,
-                    driver_id=(
-                        str(driver_model.id)
-                        if driver_model and getattr(driver_model, "id", None)
-                        else None
-                    ),
-                )
+
+                def submit_thunk(
+                    _mut=mut, _sim_params=sim_params,
+                    _driver_model=driver_model, _TestRunType=TestRunType,
+                ):
+                    return _mut.run_test(
+                        scenario=resolved_scenario,
+                        name=name,
+                        api_key=okareo.api_key,
+                        api_keys=key_registry or None,
+                        metrics_kwargs=None,
+                        test_run_type=_TestRunType.MULTI_TURN,
+                        calculate_metrics=True,
+                        checks=checks or [],
+                        simulation_params=_sim_params,
+                        driver_id=(
+                            str(_driver_model.id)
+                            if _driver_model and getattr(_driver_model, "id", None)
+                            else None
+                        ),
+                    )
             except Exception as e:
                 return format_tool_error(e, key_registry)
+            is_voice = target_type == "voice"
         else:
             # Non-augmented path: use the SDK's high-level helper. Forward any
             # peer simulation_params knobs (US8 — FR-015) that the SDK's
@@ -1563,27 +1856,74 @@ def register_tools(mcp: FastMCP) -> None:
                     sim_kwargs["stop_check"] = stop_check
                 if key_registry:
                     sim_kwargs["api_keys"] = key_registry
-                sim_kwargs["submit"] = True
-                result = okareo.run_simulation(**sim_kwargs)
+                # submit=False -> okareo.run_simulation uses mut.run_test, which
+                # runs the simulation synchronously (blocks until the backend
+                # marks the run complete) instead of the async submit_test path.
+                sim_kwargs["submit"] = False
+
+                def submit_thunk(_kwargs=sim_kwargs):
+                    return okareo.run_simulation(**_kwargs)
             except Exception as e:
                 return format_tool_error(e, key_registry)
 
-        response = {
-            "test_run_id": _get_attr(result, "id", ""),
-            "name": _get_attr(result, "name", name),
-            "app_link": _get_attr(result, "app_link", ""),
-            "message": (
-                "Simulation submitted. Check status at the app_link or use "
-                "get_test_run_results with the test_run_id."
-            ),
+            # Best-effort target type for the runtime estimate (voice vs text).
+            is_voice = False
+            try:
+                _tobj = okareo.get_target_by_name(resolved_target_name)
+                _td = _get_attr(_tobj, "target")
+                if not isinstance(_td, dict):
+                    _td = _serialize_value(_td) or {}
+                is_voice = isinstance(_td, dict) and _td.get("type") == "voice"
+            except Exception:
+                is_voice = False
+
+        # --- Faux-async handoff (spec 025): run the blocking submission in a
+        # background thread, discover the run id, and return within the buffer
+        # window so the co-pilot is never blocked. The run finishes on its own.
+        scenario_set_id = _get_attr(resolved_scenario, "scenario_id")
+        estimate_seconds = _estimate_runtime_seconds(
+            row_count, max_turns, repeats, is_voice
+        )
+
+        status, payload_obj, run_id, app_link = _buffered_submit(
+            submit_thunk,
+            okareo=okareo,
+            project_id=project_id,
+            scenario_set_id=scenario_set_id,
+            name=name,
+        )
+        if status == "failed":
+            return format_tool_error(payload_obj, key_registry)
+
+        extra = {
+            "scenario": resolved_scenario_name,
+            "target": resolved_target_name,
+            "rows": row_count,
+            "max_turns": max_turns,
+            "repeats": repeats,
         }
+        if resolved_driver_name:
+            extra["driver"] = resolved_driver_name
 
-        if based_on_run_id:
-            response["based_on_run_id"] = based_on_run_id
-
+        response = _build_handoff_response(
+            status, payload_obj, run_id, app_link,
+            name=name,
+            project_id=project_id,
+            estimate_seconds=estimate_seconds,
+            based_on_run_id=based_on_run_id,
+            extra=extra,
+        )
         return json.dumps(response, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Simulations",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def list_simulations(
         target_name: Optional[str] = None,
         scenario_name: Optional[str] = None,

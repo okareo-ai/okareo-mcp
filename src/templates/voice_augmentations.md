@@ -175,3 +175,12 @@ These are documented here because users tuning realism often want them together:
 - `checks_at_every_turn` — evaluate checks per turn instead of at end-of-run.
 - `stop_check` — `{"check_name": str, "stop_on": <value>}` halts the run when
   the named check returns the configured value.
+
+## Response: the run never blocks the caller
+
+`run_simulation` returns promptly so a long voice run never times out the
+co-pilot. Short runs return `status: "finished"` with results ready. Longer runs
+return `status: "running"` with the `test_run_id`, `app_link`, and an advisory
+`estimated_runtime` (voice runs are slower than text) — the run finishes on its
+own. In both cases, poll `get_test_run_results` with the `test_run_id` for scores
+and `get_conversation_transcript` for transcripts.

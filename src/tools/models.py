@@ -13,6 +13,7 @@ Provides six MCP tools for the generation model (MUT) lifecycle:
 import json
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from okareo_api_client.errors import UnexpectedStatus
 
 from src.error_handling import format_tool_error
@@ -60,7 +61,15 @@ def _get_available_models(okareo):
 def register_tools(mcp: FastMCP) -> None:
     """Register all generation model management tools with the FastMCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Available LLMs",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
     def list_available_llms() -> str:
         """Browse available LLMs from the Okareo registry.
 
@@ -95,7 +104,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         return json.dumps({"models": result, "count": len(result)})
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Register Generation Model",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
     def register_generation_model(name: str, model_name: str) -> str:
         """Register a generation model for testing by selecting an LLM from the registry.
 
@@ -145,7 +162,15 @@ def register_tools(mcp: FastMCP) -> None:
             "app_link": _get_attr(mut, "app_link", ""),
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Generation Models",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def list_generation_models() -> str:
         """Browse all registered generation models in the project.
 
@@ -224,7 +249,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         return json.dumps({"models": result, "count": len(result)}, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Generation Model",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def get_generation_model(name: str) -> str:
         """Read detailed information about a registered generation model.
 
@@ -264,7 +297,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         return json.dumps(response, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Update Generation Model",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
     def update_generation_model(name: str, model_name: str) -> str:
         """Change the LLM that a registered generation model points to.
 
@@ -324,7 +365,15 @@ def register_tools(mcp: FastMCP) -> None:
             "app_link": _get_attr(mut, "app_link", ""),
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Delete Generation Model",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
     def delete_generation_model(name: str) -> str:
         """Remove a registered generation model and all its related test data.
 

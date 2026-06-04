@@ -13,6 +13,7 @@ import json
 from typing import Optional
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
 from okareo_api_client.errors import UnexpectedStatus
 
 from src.error_handling import format_tool_error
@@ -164,7 +165,15 @@ def _derive_run_check_ids(okareo, run_id, name_to_id: dict) -> list:
 def register_tools(mcp: FastMCP) -> None:
     """Register all test run tools with the FastMCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Checks",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def list_checks(limit: int = 20, all_versions: bool = False) -> str:
         """List available quality checks that can be used to evaluate model outputs.
 
@@ -214,7 +223,15 @@ def register_tools(mcp: FastMCP) -> None:
             "total": total,
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Run Test",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
     def run_test(
         scenario_name: str,
         model_name: str,
@@ -225,9 +242,11 @@ def register_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Submit a quality test that evaluates a model against a scenario using checks.
 
-        Submits the test asynchronously and returns immediately with a test run ID
-        and a link to view results. Use get_test_run_results with the returned
-        test_run_id to retrieve scores once the test completes.
+        Returns promptly so the call never times out on long runs. Short runs return
+        ``status: "finished"`` with results ready; longer runs return
+        ``status: "running"`` with the ``test_run_id`` and ``app_link`` — the run
+        continues to completion on its own. In both cases, poll get_test_run_results
+        with the returned test_run_id to retrieve scores.
 
         Args:
             scenario_name: Name of the scenario to evaluate against.
@@ -316,34 +335,62 @@ def register_tools(mcp: FastMCP) -> None:
             if lifespan_ctx and isinstance(lifespan_ctx, dict):
                 key_registry = dict(lifespan_ctx.get("key_registry", {}))
 
-        # Submit test (non-blocking)
+        # Run the test through the faux-async buffer (spec 025): run_test blocks
+        # until the backend finishes, so run it on a background thread and hand the
+        # co-pilot a pollable id within the buffer window. The run survives the
+        # early return and finishes on its own (see specs/025/research.md).
+        from src.tools.simulations import _build_handoff_response, _buffered_submit
+
         run_name = name or f"{scenario_name}-{model_name}"
-        try:
-            test_kwargs = dict(
-                scenario=scenario,
-                name=run_name,
-                test_run_type=test_run_type,
-                checks=checks,
-            )
-            if key_registry:
-                test_kwargs["api_keys"] = key_registry
-            test_run = mut.submit_test(**test_kwargs)
-        except Exception as e:
-            return format_tool_error(e, key_registry)
+        test_kwargs = dict(
+            scenario=scenario,
+            name=run_name,
+            test_run_type=test_run_type,
+            checks=checks,
+        )
+        if key_registry:
+            test_kwargs["api_keys"] = key_registry
 
-        response = {
-            "test_run_id": test_run.id,
-            "name": _get_attr(test_run, "name", run_name),
-            "app_link": _get_attr(test_run, "app_link", ""),
-            "message": (
-                "Test submitted. Check status at the app_link or use "
-                "get_test_run_results with the test_run_id."
-            ),
+        def submit_thunk(_kwargs=test_kwargs):
+            return mut.run_test(**_kwargs)
+
+        status, payload_obj, run_id, app_link = _buffered_submit(
+            submit_thunk,
+            okareo=okareo,
+            project_id=project_id,
+            scenario_set_id=_get_attr(scenario, "scenario_id"),
+            name=run_name,
+            types=[test_run_type],
+        )
+        if status == "failed":
+            return format_tool_error(payload_obj, key_registry)
+
+        extra = {
+            "scenario": scenario_name,
+            "model": model_name,
+            "type": getattr(test_run_type, "value", str(test_run_type)),
         }
-
+        response = _build_handoff_response(
+            status, payload_obj, run_id, app_link,
+            name=run_name,
+            project_id=project_id,
+            estimate_seconds=None,  # single-turn tests: no conversation estimate
+            based_on_run_id=None,
+            extra=extra,
+            noun="Test",
+            transcript_hint=False,
+        )
         return json.dumps(response, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Test Runs",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def list_test_runs(
         model_name: Optional[str] = None,
         scenario_name: Optional[str] = None,
@@ -490,7 +537,15 @@ def register_tools(mcp: FastMCP) -> None:
             {"test_runs": result, "count": len(result)}, default=str
         )
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Test Run Results",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def get_test_run_results(
         test_run_id: Optional[str] = None,
         name: Optional[str] = None,
@@ -736,7 +791,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         return json.dumps(response, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Conversation Transcript",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def get_conversation_transcript(
         test_run_id: str,
         scenario_index: Optional[int] = None,
@@ -887,7 +950,15 @@ def register_tools(mcp: FastMCP) -> None:
             "error_message": _get_attr(match, "error_message"),
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Re-evaluate Test Run",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
     def reevaluate_test_run(
         test_run_id: str,
         checks: Optional[list[str]] = None,

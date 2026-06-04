@@ -323,8 +323,9 @@ _INSTRUCTIONS = (
     "2. Simulate multi-turn conversations: create_or_update_target to define the AI system "
     "under test (supports SSE streaming via 'streaming' config in next_message_params) → "
     "create_or_update_driver to define a simulated user persona → save_scenario "
-    "for test cases → run_simulation to submit (returns immediately with test_run_id and "
-    "app_link) → get_test_run_results for scores → "
+    "for test cases → run_simulation (returns promptly: status 'finished' with results "
+    "for short runs, or status 'running' with the test_run_id for longer runs that "
+    "finish on their own) → get_test_run_results for scores → "
     "get_conversation_transcript to inspect individual conversation transcripts.\n"
     "3. Create custom checks: get_templates for check prompt/code templates → "
     "create_or_update_check to register a check → or generate_check to "
@@ -347,8 +348,10 @@ _INSTRUCTIONS = (
     "scenario?', 'how do checks work?').\n"
     "- Use get_templates when the user wants to create custom checks, driver personas, or "
     "configure SSE streaming for custom endpoint targets.\n"
-    "- Both run_test and run_simulation submit asynchronously and return immediately with a "
-    "test_run_id and app_link. Use get_test_run_results to check results after completion.\n"
+    "- run_test and run_simulation return promptly without blocking: they respond with "
+    "status 'finished' (results ready) for short runs, or status 'running' with a "
+    "test_run_id (run continues on its own; longer runs include estimated_runtime) for "
+    "long runs. Poll get_test_run_results with the test_run_id to retrieve scores.\n"
     "- For list_simulations, default detail_level='summary' returns compact results; use "
     "'detailed' to include model_metrics (limit capped to 5).\n"
     "- For simulation results, use get_test_run_results for score summaries first (transcripts "
@@ -601,6 +604,25 @@ if _HTTP_MODE:
             @mcp.custom_route("/llms.txt", methods=["GET", "HEAD"])
             async def _llms_txt(request: _StarletteRequest):
                 return await _static_mount.get_response("llms.txt", request.scope)
+
+        # Brand assets served at the domain root (e.g. for the Anthropic
+        # Connector Directory logo URL, which expects a top-level public URL,
+        # not /login/…). The basePath rewrite only covers in-page references,
+        # so root requests need explicit routes like llms.txt above. Each is
+        # bundled from web/public/<name> → /app/web/<name> at build time.
+        for _brand_asset in ("okareo-logo.svg", "okareo-mark.svg"):
+            if not os.path.isfile(os.path.join(_web_root, _brand_asset)):
+                continue
+
+            def _make_brand_route(_name: str):
+                async def _serve(request: _StarletteRequest):
+                    return await _static_mount.get_response(_name, request.scope)
+
+                return _serve
+
+            mcp.custom_route(f"/{_brand_asset}", methods=["GET", "HEAD"])(
+                _make_brand_route(_brand_asset)
+            )
 
         _logger.info("Embedded login mounted at /login (root=%s)", _web_root)
     else:

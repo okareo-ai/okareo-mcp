@@ -14,6 +14,7 @@ import json
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.error_handling import format_tool_error
 from src.okareo_client import (
@@ -36,7 +37,15 @@ def _find_dashboard_by_name(dashboards, name: str):
 def register_tools(mcp: FastMCP) -> None:
     """Register analytics and dashboard tools with the FastMCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Query Analytics",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def query_analytics(
         measures: list[str],
         dimensions: Optional[list[str]] = None,
@@ -100,7 +109,15 @@ def register_tools(mcp: FastMCP) -> None:
             payload["metadata"] = metadata
         return json.dumps(payload, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Dashboards",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def list_dashboards(limit: int = 20) -> str:
         """List the analytics dashboards in your Okareo project.
 
@@ -132,7 +149,15 @@ def register_tools(mcp: FastMCP) -> None:
             "total": total,
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Dashboard",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def get_dashboard(name: str) -> str:
         """Retrieve a dashboard's full configuration by name.
 
@@ -170,7 +195,15 @@ def register_tools(mcp: FastMCP) -> None:
             return format_tool_error(e)
         return json.dumps({"dashboard": detail or match}, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Save Dashboard",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def save_dashboard(
         name: str,
         panels: Optional[list[dict]] = None,
@@ -236,7 +269,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": f"Dashboard '{name}' {action}.",
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Reorder Dashboards",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def reorder_dashboards(ordered_names: list[str]) -> str:
         """Set the display order of dashboards.
 
@@ -291,7 +332,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": f"Reordered {len(ordered_ids)} dashboard(s).",
         })
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Delete Dashboard",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
     def delete_dashboard(name: str) -> str:
         """Delete a dashboard by name.
 

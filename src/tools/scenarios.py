@@ -18,6 +18,7 @@ from typing import Optional
 from okareo_api_client.errors import UnexpectedStatus
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.error_handling import format_tool_error
 from src.okareo_client import find_test_runs, get_okareo_client, resolve_project_id
@@ -49,7 +50,15 @@ def _serialize_value(val):
 def register_tools(mcp: FastMCP) -> None:
     """Register all scenario tools with the FastMCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Save Scenario",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def save_scenario(
         name: str,
         file_path: Optional[str] = None,
@@ -185,7 +194,15 @@ def register_tools(mcp: FastMCP) -> None:
             "created": True,
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Scenarios",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def list_scenarios(limit: int = 20) -> str:
         """List scenarios in the project, most recent first.
 
@@ -242,7 +259,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         return json.dumps({"scenarios": result, "count": len(result)}, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Get Scenario",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def get_scenario(
         name: Optional[str] = None,
         scenario_id: Optional[str] = None,
@@ -329,7 +354,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         return json.dumps(response, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Create Scenario Version",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
     def create_scenario_version(base_name: str, rows: list[dict]) -> str:
         """Create a new version of an existing scenario with updated data.
 
@@ -406,7 +439,15 @@ def register_tools(mcp: FastMCP) -> None:
             "app_link": _get_attr(result, "app_link", ""),
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Preview Scenario Deletion",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+    )
     def preview_delete_scenario(
         name: Optional[str] = None,
         scenario_id: Optional[str] = None,
@@ -488,7 +529,15 @@ def register_tools(mcp: FastMCP) -> None:
             "message": message,
         }, default=str)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Delete Scenario",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
+        ),
+    )
     def delete_scenario(scenario_id: str, name: str) -> str:
         """Permanently delete a scenario and all related test data.
 
