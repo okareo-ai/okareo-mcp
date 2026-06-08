@@ -3,8 +3,10 @@ openapi client without losing the augmentation block or silence_timeout_ms
 (spec 023-tool-fixes US4 / research.md R1).
 """
 
+# Aliased away from the ``Test*`` prefix so pytest does not try to collect
+# this SDK data model as a test class (PytestCollectionWarning).
 from okareo_api_client.models.test_run_payload_v2_simulation_params_type_0 import (
-    TestRunPayloadV2SimulationParamsType0,
+    TestRunPayloadV2SimulationParamsType0 as RunPayloadV2SimParams,
 )
 from okareo.model_under_test import StopConfig
 
@@ -24,7 +26,7 @@ def test_augmentation_block_survives_openapi_round_trip() -> None:
         },
         silence_timeout_ms=8000,
     )
-    payload = TestRunPayloadV2SimulationParamsType0.from_dict(sim.to_dict())
+    payload = RunPayloadV2SimParams.from_dict(sim.to_dict())
     out = payload.to_dict()
 
     assert "augmentation" in out

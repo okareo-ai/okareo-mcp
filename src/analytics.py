@@ -182,6 +182,18 @@ def emit_tool_event(
         },
     }
 
+    # Fire-and-forget needs a running event loop. In a sync context (e.g.
+    # tests) there is none, so check first — otherwise the _send_event(...)
+    # coroutine would be constructed, create_task would raise, and the
+    # orphaned coroutine would emit a "never awaited" RuntimeWarning.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _logger.debug(
+            "No running event loop; skipping analytics for tool=%s", tool_name
+        )
+        return
+
     try:
         task = asyncio.create_task(_send_event(client.http_client, payload))
         _background_tasks.add(task)

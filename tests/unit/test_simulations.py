@@ -1057,7 +1057,7 @@ class TestVoiceDrivers:
 
         result = json.loads(tools["create_or_update_driver"](
             name="es-caller",
-            prompt_template="You are a caller.",
+            prompt_template="You are a caller. {scenario_input}",
             voice="nova",
             voice_profile="calm",
             language="es-ES",
@@ -1084,7 +1084,7 @@ class TestVoiceDrivers:
 
         result = json.loads(tools["create_or_update_driver"](
             name="bad",
-            prompt_template="You are a caller.",
+            prompt_template="You are a caller. {scenario_input}",
             voice="not-a-voice",
         ))
 
@@ -1101,11 +1101,44 @@ class TestVoiceDrivers:
 
         result = json.loads(tools["create_or_update_driver"](
             name="plain",
-            prompt_template="You are a caller.",
+            prompt_template="You are a caller. {scenario_input}",
         ))
 
         assert result["created"] is True
         # No voice/profile → no catalog fetch, only the POST.
+        assert mock_request.call_count == 1
+
+    @patch("src.tools.simulations.okareo_api_request")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_create_driver_rejects_missing_scenario_input(
+        self, mock_client, mock_request, tools
+    ):
+        mock_client.return_value = MagicMock()
+
+        result = json.loads(tools["create_or_update_driver"](
+            name="no-ref",
+            prompt_template="You are an angry customer who wants a refund.",
+        ))
+
+        assert "error" in result
+        assert "scenario_input" in result["error"]
+        # Rejected before any backend call.
+        assert mock_request.call_count == 0
+
+    @patch("src.tools.simulations.okareo_api_request")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_create_driver_accepts_property_path_reference(
+        self, mock_client, mock_request, tools
+    ):
+        mock_client.return_value = MagicMock()
+        mock_request.return_value = {"id": "drv-3", "name": "pathed"}
+
+        result = json.loads(tools["create_or_update_driver"](
+            name="pathed",
+            prompt_template="Play the role described in {scenario_input.persona.goal}.",
+        ))
+
+        assert result["created"] is True
         assert mock_request.call_count == 1
 
     @patch("src.tools.simulations.okareo_api_request")

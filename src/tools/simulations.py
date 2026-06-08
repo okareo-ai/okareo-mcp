@@ -1214,6 +1214,19 @@ def register_tools(mcp: FastMCP) -> None:
         # Auto-prefix bare mustache references with scenario_input.
         prompt_template = _prefix_template_vars(prompt_template)
 
+        # A driver with no reference back to the scenario_input never works:
+        # the persona is fixed instead of being seeded from the scenario row.
+        # Catches both {scenario_input} and {scenario_input.property.path}.
+        if "{scenario_input" not in prompt_template:
+            return json.dumps({
+                "error": (
+                    "prompt_template must embed at least one scenario_input "
+                    "reference so the driver is seeded from the scenario. Use "
+                    "{scenario_input} for the whole input or "
+                    "{scenario_input.property.path} for a specific field."
+                ),
+            })
+
         # POST /v0/driver directly: the published SDK's Driver dataclass has no
         # `language` field, so it cannot carry voice language through
         # create_or_update_driver (see specs/022-sdk-132-upgrade research R13).

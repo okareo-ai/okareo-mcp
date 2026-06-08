@@ -205,7 +205,8 @@ class TestEmitToolEvent:
             server_version="0.0.7",
             enabled=True,
         )
-        with patch("src.analytics.asyncio.create_task") as mock_task:
+        with patch("src.analytics.asyncio.get_running_loop"), \
+             patch("src.analytics.asyncio.create_task") as mock_task:
             emit_tool_event(client, "run_test", True)
             mock_task.assert_called_once()
 
@@ -225,6 +226,7 @@ class TestEmitToolEvent:
             captured_payload.update(payload)
 
         with patch("src.analytics._send_event", side_effect=capture_send), \
+             patch("src.analytics.asyncio.get_running_loop"), \
              patch("src.analytics.asyncio.create_task") as mock_task:
             # Make create_task actually call the coroutine
             def run_coro(coro):
@@ -275,6 +277,7 @@ class TestEmitToolEvent:
             captured_payload.update(payload)
 
         with patch("src.analytics._send_event", side_effect=capture_send), \
+             patch("src.analytics.asyncio.get_running_loop"), \
              patch("src.analytics.asyncio.create_task") as mock_task:
             def run_coro(coro):
                 loop = asyncio.new_event_loop()
