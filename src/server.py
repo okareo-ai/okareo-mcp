@@ -42,7 +42,7 @@ except ImportError:
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
-from mcp.types import TextContent
+from mcp.types import CallToolResult, TextContent
 from pydantic import AnyHttpUrl
 
 from src.analytics import emit_tool_event, init_analytics, shutdown_analytics
@@ -771,16 +771,21 @@ else:
     _throttle = None  # type: ignore[assignment]
 
 
-def _error_content(message: str) -> list[TextContent]:
-    """Wrap a pre-formatted error/throttle JSON string as MCP tool content.
+def _error_content(message: str) -> CallToolResult:
+    """Wrap a pre-formatted error/throttle JSON string as an MCP error result.
 
-    The low-level CallTool handler normalizes a handler's return value into a
-    CallToolResult. A bare string would be treated as an iterable of content
-    blocks and split character-by-character, so wrapper-level error payloads
-    must be returned as TextContent — mirroring how FastMCP converts a tool's
-    own string return via ``convert_result=True``.
+    Must be a full ``CallToolResult`` with ``isError=True``, not bare content:
+    every tool here is annotated ``-> str``, so FastMCP advertises an
+    outputSchema, and the low-level CallTool handler rejects any non-error
+    result lacking structuredContent ("Output validation error: outputSchema
+    defined but no structured output returned") — masking the real error.
+    A CallToolResult is passed through verbatim, skipping that validation,
+    which matches how stock FastMCP surfaces tool exceptions.
     """
-    return [TextContent(type="text", text=message)]
+    return CallToolResult(
+        content=[TextContent(type="text", text=message)],
+        isError=True,
+    )
 
 
 async def _instrumented_call_tool(name, arguments):

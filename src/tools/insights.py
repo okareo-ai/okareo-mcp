@@ -38,6 +38,170 @@ TIME_RANGES: tuple[str, ...] = (
 # supplies neither ``time_range`` nor ``time_dimensions``.
 DEFAULT_ANALYTICS_TIME_RANGE = "LAST_30_DAYS"
 
+# The appfrontend dashboard grid is 12 columns wide; rows are unbounded.
+GRID_COLUMNS = 12
+
+# Named card sizes -> (w, h) on the grid. The dimension table is the
+# product-specified appfrontend contract (spec 027, clarification 2026-06-10).
+# Names exist only in the MCP layer — the backend stores raw x/y/w/h, so
+# resolution must happen here before the save endpoint is called.
+CARD_SIZES: dict[str, tuple[int, int]] = {
+    "small-square": (3, 6),
+    "half-rectangle": (6, 6),
+    "half-square": (6, 9),
+    "full-rectangle": (12, 9),
+    "full-square": (12, 12),
+}
+
+# Intended use per size — rendered into error messages so a caller that
+# guessed a bad name learns the whole catalog without another lookup.
+CARD_SIZE_USES: dict[str, str] = {
+    "small-square": "single stat metrics",
+    "half-rectangle": "line/bar/area trends sharing a row",
+    "half-square": "radar/composed and denser charts",
+    "full-rectangle": "wide time-series comparisons",
+    "full-square": "tables",
+}
+
+
+def _card_size_catalog_text() -> str:
+    return ", ".join(
+        f"{name} ({w}x{h}, {CARD_SIZE_USES[name]})"
+        for name, (w, h) in CARD_SIZES.items()
+    )
+
+
+def _min_height_for_width(w: int) -> int:
+    # Legibility floor derived from the catalog as a step function:
+    # half-width-and-under sizes bottom out at h=6, full-width at h=9.
+    return 6 if w <= 6 else 9
+
+
+def _rects_overlap(a: dict, b: dict) -> bool:
+    return (
+        a["x"] < b["x"] + b["w"]
+        and b["x"] < a["x"] + a["w"]
+        and a["y"] < b["y"] + b["h"]
+        and b["y"] < a["y"] + a["h"]
+    )
+
+
+def _first_free_slot(w: int, h: int, placed: list[dict]) -> dict:
+    """First-fit scan: lowest row, then leftmost column, that fits ``w``×``h``."""
+    max_bottom = max((p["y"] + p["h"] for p in placed), default=0)
+    # y == max_bottom is below every placed panel, so the scan always succeeds
+    # for any w that fits the grid at all.
+    for y in range(max_bottom + 1):
+        for x in range(GRID_COLUMNS - w + 1):
+            candidate = {"x": x, "y": y, "w": w, "h": h}
+            if not any(_rects_overlap(candidate, p) for p in placed):
+                return candidate
+    return {"x": 0, "y": max_bottom, "w": w, "h": h}
+
+
+def _resolve_panel_layouts(
+    panels: list,
+) -> tuple[list[dict], list[dict], Optional[str]]:
+    """Resolve panel sizing/placement into backend-ready raw layouts.
+
+    Returns ``(resolved_panels, adjustments, error)``. On success every panel
+    carries a complete ``layout {x, y, w, h}`` and no ``size`` key — the
+    backend only understands raw layouts (spec 027 FR-002a). ``adjustments``
+    records every delta between what was submitted and what will persist, so
+    the caller is never silently overridden.
+    """
+    resolved: list[dict] = []
+    adjustments: list[dict] = []
+    # (resolved panel, w, h) awaiting auto-placement, in submitted order.
+    pending: list[tuple[dict, int, int]] = []
+    # Explicitly positioned rects (with title for overlap error messages).
+    placed: list[dict] = []
+
+    for i, panel in enumerate(panels):
+        if not isinstance(panel, dict):
+            return [], [], f"Panel {i + 1} must be an object."
+        title = panel.get("title") or f"panel {i + 1}"
+        size = panel.get("size")
+        layout = panel.get("layout")
+        layout = layout if isinstance(layout, dict) else None
+
+        if size is None and layout is None:
+            return [], [], (
+                f"Panel '{title}': each panel needs either a 'size' "
+                "(preferred) or a 'layout'."
+            )
+
+        if size is not None:
+            if size not in CARD_SIZES:
+                return [], [], (
+                    f"Panel '{title}': unknown size '{size}'. "
+                    f"Valid sizes: {_card_size_catalog_text()}."
+                )
+            w, h = CARD_SIZES[size]
+            for field, value in (("w", w), ("h", h)):
+                given = layout.get(field) if layout else None
+                if given is not None and given != value:
+                    adjustments.append({
+                        "panel": title,
+                        "field": f"layout.{field}",
+                        "from": given,
+                        "to": value,
+                        "reason": (
+                            f"size '{size}' takes precedence over raw "
+                            "dimensions"
+                        ),
+                    })
+        else:
+            w = layout.get("w")
+            h = layout.get("h")
+            if (
+                not isinstance(w, int) or not isinstance(h, int)
+                or w < 1 or h < 1
+            ):
+                return [], [], (
+                    f"Panel '{title}': layout requires integer w >= 1 and "
+                    "h >= 1 — or use a named 'size' instead "
+                    f"({', '.join(CARD_SIZES)})."
+                )
+            min_h = _min_height_for_width(w)
+            if h < min_h:
+                band = "w<=6" if w <= 6 else "w>6"
+                adjustments.append({
+                    "panel": title,
+                    "field": "h",
+                    "from": h,
+                    "to": min_h,
+                    "reason": f"minimum height for {band} is {min_h}",
+                })
+                h = min_h
+
+        out = {k: v for k, v in panel.items() if k != "size"}
+        x = layout.get("x") if layout else None
+        y = layout.get("y") if layout else None
+        if isinstance(x, int) and isinstance(y, int) and x >= 0 and y >= 0:
+            rect = {"x": x, "y": y, "w": w, "h": h, "title": title}
+            for other in placed:
+                if _rects_overlap(rect, other):
+                    return [], [], (
+                        f"Panel '{other['title']}' and panel '{title}' "
+                        "overlap at their explicit positions. Omit x/y to "
+                        "auto-place panels, or adjust the positions."
+                    )
+            placed.append(rect)
+            out["layout"] = {"x": x, "y": y, "w": w, "h": h}
+        else:
+            pending.append((out, w, h))
+        resolved.append(out)
+
+    # Explicitly positioned panels are fixed obstacles; everything else flows
+    # around them first-fit in submitted order, so layouts are deterministic.
+    for out, w, h in pending:
+        slot = _first_free_slot(w, h, placed)
+        placed.append({**slot, "title": out.get("title", "")})
+        out["layout"] = slot
+
+    return resolved, adjustments, None
+
 
 def _validate_time_range(time_range: Optional[str]) -> Optional[str]:
     """Return an error message if ``time_range`` is set but unsupported."""
@@ -296,6 +460,19 @@ def register_tools(mcp: FastMCP) -> None:
         If a dashboard with this name already exists it is updated; otherwise a
         new one is created.
 
+        Size each panel with a named ``size`` from the catalog below (PREFERRED
+        — guarantees a legible layout) and omit positions entirely: panels are
+        auto-placed in the order given (left-to-right, top-to-bottom on a
+        12-column grid, wrapping rows, never overlapping).
+
+        Size catalog and when to use each:
+
+        - ``small-square`` (3x6): single ``stat`` metrics.
+        - ``half-rectangle`` (6x6): ``line``/``bar``/``area`` trends, two per row.
+        - ``half-square`` (6x9): ``radar``, ``composed``, denser charts.
+        - ``full-rectangle`` (12x9): wide time-series comparisons.
+        - ``full-square`` (12x12): ``table`` panels.
+
         Args:
             name: Dashboard name — the upsert key.
             panels: Optional list of panel definitions. Each panel is an object:
@@ -310,8 +487,14 @@ def register_tools(mcp: FastMCP) -> None:
                   required; everything else is optional. ``cube`` defaults to
                   ``check_trend``. The dashboard ``time_range`` applies to all
                   panels — panels do NOT carry their own time range.
-                - ``layout`` (object, required): grid placement
+                - ``size`` (str): a catalog name (see above). Required unless
+                  ``layout`` is given; wins over ``layout`` w/h if both appear.
+                - ``layout`` (object): raw grid placement
                   ``{"x": >=0, "y": >=0, "w": >=1, "h": >=1}`` (integers).
+                  Only needed when not using ``size``, or to pin an explicit
+                  position (give both ``x`` and ``y``; with ``size``, w/h are
+                  ignored). Heights below the legibility floor are sized up on
+                  save: ``h >= 6`` when ``w <= 6``, ``h >= 9`` when ``w > 6``.
                 - ``table_config`` (object, optional): ONLY for
                   ``chart_type == "table"``.
 
@@ -332,12 +515,18 @@ def register_tools(mcp: FastMCP) -> None:
                     {"title": "Avg Check Value by Check", "chart_type": "bar",
                      "query": {"measures": ["avg_check_value"],
                                "dimensions": ["check.name"]},
-                     "layout": {"x": 0, "y": 0, "w": 6, "h": 4}}
+                     "size": "half-rectangle"}
             description: Optional dashboard description.
             time_range: Optional default look-back window for the whole
                 dashboard. One of: LAST_HOUR, LAST_24_HOURS, LAST_7_DAYS,
                 LAST_14_DAYS, LAST_30_DAYS, LAST_90_DAYS. Defaults to
                 LAST_90_DAYS when omitted.
+
+        Returns:
+            JSON with the saved dashboard and ``action`` (created/updated).
+            When sizing or dimensions were changed on save (size overriding
+            layout w/h, or a height floored), an ``adjustments`` list reports
+            each change: ``{"panel", "field", "from", "to", "reason"}``.
         """
         if not name or not name.strip():
             return json.dumps({"error": "name is required."})
@@ -345,6 +534,14 @@ def register_tools(mcp: FastMCP) -> None:
         tr_error = _validate_time_range(time_range)
         if tr_error:
             return json.dumps({"error": tr_error})
+
+        adjustments: list[dict] = []
+        if panels is not None:
+            if not isinstance(panels, list):
+                return json.dumps({"error": "panels must be a list."})
+            panels, adjustments, layout_error = _resolve_panel_layouts(panels)
+            if layout_error:
+                return json.dumps({"error": layout_error})
 
         try:
             okareo = get_okareo_client()
@@ -387,11 +584,14 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
-        return json.dumps({
+        payload: dict = {
             "dashboard": result,
             "action": action,
             "message": f"Dashboard '{name}' {action}.",
-        }, default=str)
+        }
+        if adjustments:
+            payload["adjustments"] = adjustments
+        return json.dumps(payload, default=str)
 
     @mcp.tool(
         title="Reorder Dashboards",

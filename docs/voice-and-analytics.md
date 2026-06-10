@@ -53,6 +53,11 @@ as MCP tools from any connected agent (Claude Code, Cursor, …).
   returns the available cubes/dimensions/measures.
 - Dashboards — `list_dashboards`, `get_dashboard`, `save_dashboard` (create or
   update by name), `reorder_dashboards`, `delete_dashboard`.
+- Panel sizing — give each `save_dashboard` panel a named `size`
+  (`small-square` for single stats, `half-rectangle`/`half-square` for charts,
+  `full-rectangle`/`full-square` for wide series and tables) and omit
+  positions; panels are auto-placed without overlap. Raw `layout` values are
+  still accepted, with heights below the legibility floor sized up on save.
 
 ## Notes
 
