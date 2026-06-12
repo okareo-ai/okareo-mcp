@@ -149,7 +149,7 @@ class TestCreateModelBasedCheck:
             description="Check politeness",
             check_type="model",
             output_type="pass_fail",
-            prompt_template="Is this polite? {generation}",
+            prompt_template="Is this polite? {model_output}",
         ))
 
         assert result["created"] is True
@@ -169,7 +169,7 @@ class TestCreateModelBasedCheck:
             description="Score quality 1-5",
             check_type="model",
             output_type="score",
-            prompt_template="Score this: {generation}",
+            prompt_template="Score this: {model_output}",
         ))
 
         assert result["created"] is True
@@ -191,7 +191,7 @@ class TestCreateModelBasedCheck:
                 description="Analyze quality",
                 check_type="model",
                 output_type="analysis",
-                prompt_template="Analyze this: {generation}",
+                prompt_template="Analyze this: {model_output}",
             ))
 
             assert result["created"] is True
@@ -264,7 +264,7 @@ class TestCreateAudioCheck:
             description="Check empathy in voice",
             check_type="model",
             output_type="pass_fail",
-            prompt_template="Is this empathetic? {generation}",
+            prompt_template="Is this empathetic? {model_output}",
             is_audio=True,
         ))
 
@@ -521,7 +521,7 @@ class TestCheckVersioningAndTags:
             description="A tagged check",
             check_type="model",
             output_type="pass_fail",
-            prompt_template="Is this polite? {generation}",
+            prompt_template="Is this polite? {model_output}",
             tags=["prod", "voice"],
         ))
 

@@ -178,7 +178,10 @@ def register_tools(mcp: FastMCP) -> None:
         """List available quality checks that can be used to evaluate model outputs.
 
         Returns checks (both built-in and custom) available in your Okareo account.
-        Each check has a name, description, and output type (score or pass_fail).
+        Each check has a name, description, and output_data_type. output_data_type
+        uses the server vocabulary: "bool" is a pass/fail check and "int" is a
+        scored check — these correspond to output_type "pass_fail" and "score" in
+        create_or_update_check and generate_check.
         Use these check names with run_test to evaluate model quality.
 
         Args:

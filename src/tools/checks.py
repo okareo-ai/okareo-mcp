@@ -104,24 +104,60 @@ def register_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Create or update a quality check by name (upsert). Supports model-based, code-based, and audio checks.
 
+        Saving to an existing name creates a new version of that check (see
+        get_check's "available_versions"). Before writing a prompt_template or
+        code_contents from scratch, fetch a worked example with get_templates:
+        "boolean_check_prompt", "score_check_prompt", "analysis_check_prompt",
+        or "check_code".
+
         Args:
             name: Unique name for the check.
             description: What the check evaluates.
-            check_type: "model" (prompt-based) or "code" (Python class).
-            output_type: "pass_fail", "score", or "analysis".
-            tags: Optional list of string tags to organize the check. Tags are
-                stored with the check and returned by get_check.
-            prompt_template: Required when check_type="model". Prompt with placeholders:
-                {generation}, {scenario_input}, {scenario_result}, {model_input},
-                {model_output}, {message_history}, {tool_calls}, {tools},
-                {model_output_metadata}, {simulation_message_history}.
-            code_contents: Required when check_type="code". Python source code
-                implementing class Check(CodeBasedCheck) with a @staticmethod
-                evaluate() method returning CheckResponse. Available parameters
-                (all optional): model_output, scenario_input, scenario_result,
-                metadata, model_input.
+            check_type: "model" (an LLM judge driven by prompt_template) or
+                "code" (a deterministic Python class in code_contents).
+            output_type: "pass_fail" (boolean verdict), "score" (numeric, e.g.
+                a 1-5 rubric), or "analysis" (free-form qualitative feedback;
+                only valid with check_type="model"). Note: list_checks and
+                get_check report this as output_data_type in the server
+                vocabulary, where "bool" means pass_fail and "int" means score.
+            prompt_template: Required when check_type="model". The judge
+                prompt. Inject the runtime data the judge needs with these
+                placeholders:
+                - {model_output}: the model output being evaluated. In a
+                  multi-turn conversation this is ONLY the final assistant
+                  message, not the full conversation.
+                - {scenario_input}: the scenario input / source text.
+                - {scenario_result}: the reference/expected output.
+                - {model_input}: what was sent to the model (prompt or
+                  messages).
+                - {message_history}: the full multi-turn conversation — the
+                  model_input messages plus the assistant's model_output. Use
+                  this when the check must judge the whole conversation.
+                - {tool_calls}: the tool/function calls the model just made.
+                - {tools}: the tool definitions/schema available to the model.
+                - {model_output_metadata}: metadata attached to the most
+                  recent model output.
+                - {simulation_message_history}: full conversation history
+                  reconstructed from trace metadata. Only populated for traced
+                  (ingested) conversations; for simulations and evaluations
+                  use {message_history}.
+                The legacy {generation} placeholder is deprecated — use
+                {model_output} instead.
+            code_contents: Required when check_type="code" (output_type
+                "pass_fail" or "score" only). Python source defining
+                `class Check(CodeBasedCheck)` with a
+                `@staticmethod def evaluate(...) -> CheckResponse` method.
+                Start from `from okareo.checks import CodeBasedCheck,
+                CheckResponse`. evaluate() may declare any subset of these
+                parameters: model_output, scenario_input, scenario_result,
+                metadata, model_input. Return CheckResponse(score=...,
+                explanation=...) where score is a bool for pass_fail or an
+                int/float for score. See get_templates("check_code") for
+                complete examples.
             is_audio: Set to true for audio/voice evaluation. Only valid with
                 check_type="model".
+            tags: Optional list of string tags to organize the check. Tags are
+                stored with the check and returned by get_check.
         """
         from okareo_api_client.api.default import (
             check_create_or_update_v0_check_create_or_update_post,
@@ -278,16 +314,28 @@ def register_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Generate a check from a natural language description. Uses AI to create the prompt template (model checks) or Python code (code checks), then saves the check.
 
+        Use this when you only have a description of what to evaluate. When
+        you already know the exact prompt template or Python code the check
+        should use, call create_or_update_check directly instead. The
+        generated prompt/code is returned in the response — review it and
+        refine with create_or_update_check if needed.
+
         Args:
             name: Name for the generated check.
             description: Natural language description of what to evaluate
-                (e.g., "check if the response is toxic").
-            output_type: "pass_fail", "score", or "analysis". If the server does not
-                support generating a particular output type, the error is returned
-                gracefully.
-            check_type: "model" or "code".
-            requires_scenario_input: Whether the check needs scenario input.
-            requires_scenario_result: Whether the check needs expected result.
+                (e.g., "check if the response is toxic"). The more specific
+                the description, the better the generated check.
+            output_type: "pass_fail" (boolean verdict), "score" (numeric), or
+                "analysis" (free-form qualitative feedback; model checks only).
+            check_type: "model" (LLM judge) or "code" (deterministic Python).
+            requires_scenario_input: Set true when the evaluation must compare
+                the output against the scenario input. The generated check
+                will reference {scenario_input} and only works on runs whose
+                scenarios provide it.
+            requires_scenario_result: Set true when the evaluation must
+                compare the output against the expected result. The generated
+                check will reference {scenario_result} and only works on runs
+                whose scenarios provide it.
         """
         from okareo_api_client.models.evaluator_spec_request import (
             EvaluatorSpecRequest,

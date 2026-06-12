@@ -36,16 +36,17 @@ The prompt template above uses the most common placeholders. The full set availa
 
 | Placeholder | Description |
 |-------------|-------------|
-| `{generation}` | The model's generated output |
-| `{scenario_input}` | The original scenario input |
-| `{scenario_result}` | The expected result from the scenario |
-| `{model_input}` | The input sent to the model |
-| `{model_output}` | The model's output |
-| `{message_history}` | Conversation history |
-| `{tool_calls}` | Tool calls made by the model |
-| `{tools}` | Tools available to the model |
-| `{model_output_metadata}` | Metadata about the model output |
-| `{simulation_message_history}` | Simulation conversation history |
+| `{model_output}` | The model output being evaluated. In a multi-turn conversation this is ONLY the final assistant message, not the full conversation |
+| `{scenario_input}` | The scenario input / source text |
+| `{scenario_result}` | The reference/expected output from the scenario |
+| `{model_input}` | What was sent to the model (prompt or messages) |
+| `{message_history}` | The full multi-turn conversation — the model_input messages plus the assistant's model_output. Use this when the check must judge the whole conversation |
+| `{tool_calls}` | The tool/function calls the model just made |
+| `{tools}` | The tool definitions/schema available to the model |
+| `{model_output_metadata}` | Metadata attached to the most recent model output |
+| `{simulation_message_history}` | Full conversation history reconstructed from trace metadata. Only populated for traced (ingested) conversations; for simulations and evaluations use `{message_history}` |
+
+> The legacy `{generation}` placeholder is deprecated — use `{model_output}` instead.
 
 ## Example Criteria
 
