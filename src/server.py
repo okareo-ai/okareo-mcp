@@ -608,6 +608,20 @@ if _HTTP_MODE:
                 return await _static_mount.get_response(sub, request.scope)
             return await _static_mount.get_response("index.html", request.scope)
 
+        # Marketing/getting-started landing page at the domain root. Without
+        # this, GET https://tools.okareo.com/ 404s (only /mcp, /login, and the
+        # well-known routes are handled). Bundled into the web export from
+        # web/public/index-landing.html → /app/web/index-landing.html (the
+        # Next.js export already owns index.html for /login, so the file uses a
+        # distinct name and we serve it explicitly at /).
+        if os.path.isfile(os.path.join(_web_root, "index-landing.html")):
+
+            @mcp.custom_route("/", methods=["GET", "HEAD"])
+            async def _root_landing(request: _StarletteRequest):
+                return await _static_mount.get_response(
+                    "index-landing.html", request.scope
+                )
+
         # llms.txt convention (llmstxt.org): served at the domain root so agents
         # can discover the MCP server's tool surface at
         # https://tools.okareo.com/llms.txt. Bundled into the web export from
