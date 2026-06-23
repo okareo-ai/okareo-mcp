@@ -1,40 +1,123 @@
 "use client";
 
-// Embedded login page entry point.
+// Embedded login page entry point (feature 029).
 //
-// Three branches per specs/021-embedded-login/contracts/login-page-contract.md §1.2:
-//   pending valid    → render <AuthPanel/> (sign-in form; sign-up tab in US2)
-//   pending absent   → "install in your copilot first" landing
-//   pending malformed → "malformed link" error
-//
-// MCPBenefits side panel lands in US3 (T045/T046).
+// Runs INSIDE the client-only FronteggProvider (mounted by layout.tsx). The
+// Frontegg embedded box renders every sign-in method enabled centrally
+// (email/password + Google + any other social provider — FR-001/003/005); the
+// box also owns sign-up and its activation/verify-email screens (FR-006/006a,
+// US3). This page's job is the orchestration the box does not do:
+//   1. resolve the one-time `pending` code (URL, or sessionStorage after the
+//      Google full-page redirect — research.md R4);
+//   2. show the box when unauthenticated;
+//   3. once authenticated, post the Frontegg tokens to /oauth/handoff exactly
+//      once and navigate back to the MCP client (FR-004/008/009).
+// Absent/malformed `pending` → a neutral landing; never a hand-off.
 
-import { useEffect, useState } from "react";
-import { Box, Center, Container, Stack, Text, Title } from "@mantine/core";
-import { AuthPanel } from "@/components/AuthPanel";
-import { parsePendingCode, type PendingCodeStatus } from "@/lib/pending";
+import { useEffect, useRef, useState } from "react";
+import { Box, Center, Container, Loader, Stack, Text, Title } from "@mantine/core";
+import { useAuth, useLoginWithRedirect } from "@frontegg/react";
+
+import { ErrorBanner, type DisplayableError } from "@/components/ErrorBanner";
+import { toHandoffRequest } from "@/lib/auth-tokens";
+import { postHandoff } from "@/lib/handoff";
+import {
+    clearPendingCode,
+    parsePendingCode,
+    resolvePendingCode,
+    type PendingCodeStatus,
+} from "@/lib/pending";
+
+type Phase =
+    | { kind: "loading" }
+    | { kind: "no-flow"; status: PendingCodeStatus }
+    | { kind: "authenticating" }
+    | { kind: "handing-off" }
+    | { kind: "error"; error: DisplayableError };
 
 export default function LoginPage() {
-    const [status, setStatus] = useState<PendingCodeStatus | null>(null);
+    const { isAuthenticated, isLoading, user } = useAuth();
+    const loginWithRedirect = useLoginWithRedirect();
+
+    const [resolved, setResolved] = useState(false);
+    const [pendingCode, setPendingCode] = useState<string | null>(null);
+    const [urlStatus, setUrlStatus] = useState<PendingCodeStatus>({ kind: "absent" });
+    const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+
+    const handoffFired = useRef(false);
+    const redirectRequested = useRef(false);
+
+    // Resolve the pending code once on mount: a fresh `?pending=` (persisted for
+    // the redirect round-trip) or a previously persisted code on the way back.
+    useEffect(() => {
+        setUrlStatus(parsePendingCode());
+        setPendingCode(resolvePendingCode());
+        setResolved(true);
+    }, []);
 
     useEffect(() => {
-        setStatus(parsePendingCode());
-    }, []);
+        if (!resolved) return;
+
+        // No flow in progress → neutral landing (distinguish malformed vs absent).
+        if (pendingCode === null) {
+            setPhase({ kind: "no-flow", status: urlStatus });
+            return;
+        }
+
+        // Flow in progress — wait for the SDK to settle before deciding.
+        if (isLoading) {
+            setPhase({ kind: "loading" });
+            return;
+        }
+
+        // Not signed in → hand control to the embedded box (email/pw + Google).
+        if (!isAuthenticated) {
+            setPhase({ kind: "authenticating" });
+            if (!redirectRequested.current) {
+                redirectRequested.current = true;
+                void loginWithRedirect();
+            }
+            return;
+        }
+
+        // Signed in → hand off exactly once.
+        if (handoffFired.current) return;
+        handoffFired.current = true;
+        setPhase({ kind: "handing-off" });
+
+        const extraction = toHandoffRequest(pendingCode, user);
+        if (!extraction.ok) {
+            setPhase({ kind: "error", error: { kind: "invalid_token", message: "" } });
+            return;
+        }
+
+        void postHandoff(extraction.request).then((result) => {
+            if (result.kind === "success") {
+                clearPendingCode();
+                window.location.assign(result.redirectUrl);
+            } else {
+                setPhase({ kind: "error", error: result });
+            }
+        });
+    }, [resolved, pendingCode, urlStatus, isAuthenticated, isLoading, user, loginWithRedirect]);
 
     return (
         <Container size="lg" py="xl">
             <Center mih="80vh">
-                {status === null && (
-                    <Text c="dimmed" size="sm">
-                        Loading…
-                    </Text>
+                {(phase.kind === "loading" ||
+                    phase.kind === "authenticating" ||
+                    phase.kind === "handing-off") && (
+                    <Stack gap="sm" align="center">
+                        <Loader size="md" />
+                        <Text c="dimmed" size="sm">
+                            {phase.kind === "handing-off"
+                                ? "Completing sign-in…"
+                                : "Signing you in…"}
+                        </Text>
+                    </Stack>
                 )}
 
-                {status?.kind === "valid" && (
-                    <AuthPanel pendingCode={status.code} />
-                )}
-
-                {status?.kind === "absent" && (
+                {phase.kind === "no-flow" && phase.status.kind !== "malformed" && (
                     <Box maw={520}>
                         <Stack gap="md" align="center" ta="center">
                             <Title order={1} size="h2" c="primary.7">
@@ -53,7 +136,7 @@ export default function LoginPage() {
                     </Box>
                 )}
 
-                {status?.kind === "malformed" && (
+                {phase.kind === "no-flow" && phase.status.kind === "malformed" && (
                     <Box maw={520}>
                         <Stack gap="md" align="center" ta="center">
                             <Title order={2} size="h3" c="red.7">
@@ -62,6 +145,17 @@ export default function LoginPage() {
                             <Text c="dimmed">
                                 Please retry sign-in from your copilot.
                             </Text>
+                        </Stack>
+                    </Box>
+                )}
+
+                {phase.kind === "error" && (
+                    <Box maw={520}>
+                        <Stack gap="md" align="center" ta="center">
+                            <Title order={2} size="h3">
+                                Sign-in couldn&apos;t be completed
+                            </Title>
+                            <ErrorBanner error={phase.error} />
                         </Stack>
                     </Box>
                 )}

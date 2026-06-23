@@ -1,32 +1,29 @@
 "use client";
 
-// Non-leaky error display for the embedded login flow (FR-012).
+// Non-leaky status display for the embedded login flow (FR-012, FR-013).
 //
-// Maps the discriminated union of auth errors → a fixed, neutral user-facing
-// message. We intentionally do NOT include free-form messages from
-// Frontegg / the handoff endpoint here — every variant resolves to a
-// canonical message so attackers can't probe for account-existence by
-// reading error wording differences (US1 acceptance scenario 2; US2
-// acceptance scenario 2).
+// With the Frontegg embedded box (feature 029), credential/MFA/social errors are
+// handled inside the box itself. The only states this banner surfaces are the
+// ones the page owns: hand-off failures and post-sign-up activation guidance.
+// Every variant resolves to a fixed, neutral message so error wording can't be
+// used to probe for account existence (US1 scenario 2; US2 scenario 2).
 
 import { Alert } from "@mantine/core";
-import { IconAlertTriangle } from "@tabler/icons-react";
+import { IconAlertTriangle, IconMailFast } from "@tabler/icons-react";
 
-import type { AuthError } from "@/lib/frontegg-rest";
 import type { HandoffError } from "@/lib/handoff";
 
-export type DisplayableError = AuthError | HandoffError;
+// Informational (non-error) flow states the page may surface.
+export type FlowNotice =
+    | { kind: "verification_pending" } // US3: sign-up needs email verification (FR-013)
+    | { kind: "unknown_error" }; // defensive fallback
+
+export type DisplayableError = HandoffError | FlowNotice;
 
 function messageFor(err: DisplayableError): string {
     switch (err.kind) {
-        case "invalid_credentials":
-            return "We couldn't sign you in with those credentials. Check your email and password and try again.";
-        case "signup_conflict":
-            return "If an account exists for this email, please sign in instead.";
         case "verification_pending":
-            return "We've sent a verification email — please confirm your address, then sign in.";
-        case "mfa_required":
-            return "Your account requires multi-factor authentication. For now, please sign in via the Okareo dashboard and retry from your copilot.";
+            return "We've sent a verification email — please confirm your address, then retry from your copilot.";
         case "frontegg_unavailable":
             return "The authentication service is temporarily unavailable. Please retry in a moment.";
         case "expired":
@@ -44,11 +41,12 @@ function messageFor(err: DisplayableError): string {
 
 export function ErrorBanner({ error }: { error: DisplayableError | null }) {
     if (!error) return null;
+    const isNotice = error.kind === "verification_pending";
     return (
         <Alert
-            role="alert"
-            icon={<IconAlertTriangle size={20} />}
-            color="red"
+            role={isNotice ? "status" : "alert"}
+            icon={isNotice ? <IconMailFast size={20} /> : <IconAlertTriangle size={20} />}
+            color={isNotice ? "blue" : "red"}
             variant="light"
             mt="md"
             data-error-kind={error.kind}

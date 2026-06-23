@@ -3,7 +3,7 @@
   "name": "com.okareo/okareo",
   "title": "Okareo",
   "description": "Simulation, evaluation and monitoring for voice agents.",
-  "version": "0.0.38",
+  "version": "0.0.39",
   "repository": {
     "url": "https://github.com/okareo-ai/okareo-mcp",
     "source": "github"

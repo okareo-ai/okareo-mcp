@@ -1,21 +1,30 @@
 "use client";
 
 // Root layout for the embedded login page. Wraps every route in:
-//   - MantineProvider (theme + CSS-in-JS context)
+//   - MantineProvider (theme + CSS-in-JS context) — server-renderable
 //   - Notifications stack (Mantine notifications portal)
+//   - Frontegg embedded-login boundary (client-only) — feature 029
 //
-// No FronteggAppProvider — see specs/021-embedded-login/research.md R1.
-// We talk to Frontegg's identity REST API directly from client components;
-// no server middleware exists in a static export.
+// The Frontegg provider (@frontegg/react) is a browser-only SPA SDK, so it is
+// loaded via next/dynamic({ ssr: false }) and never runs during the static
+// export prerender. The /login page renders inside it (and thus only in the
+// browser, where useAuth has a provider). See specs/029-google-oauth-embedded.
 
 import "@mantine/core/styles.css";
 import "@mantine/notifications/styles.css";
 import "./globals.css";
 
 import type { ReactNode } from "react";
-import { ColorSchemeScript, MantineProvider } from "@mantine/core";
+import { ColorSchemeScript, Loader, MantineProvider } from "@mantine/core";
 import { Notifications } from "@mantine/notifications";
+import dynamic from "next/dynamic";
 import { cssVariablesResolver, theme } from "@/theme";
+
+// ssr:false keeps @frontegg/react out of the prerender (T004 spike).
+const FronteggBoundary = dynamic(() => import("./providers"), {
+    ssr: false,
+    loading: () => <Loader size="sm" />,
+});
 
 export default function RootLayout({ children }: { children: ReactNode }) {
     return (
@@ -39,7 +48,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
                     defaultColorScheme="light"
                 >
                     <Notifications />
-                    {children}
+                    <FronteggBoundary>{children}</FronteggBoundary>
                 </MantineProvider>
             </body>
         </html>

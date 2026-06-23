@@ -586,14 +586,27 @@ if _HTTP_MODE:
         async def _login_index(request: _StarletteRequest):
             return await _static_mount.get_response("index.html", request.scope)
 
+        _web_root_real = os.path.realpath(_web_root)
+
         @mcp.custom_route("/login/{path:path}", methods=["GET", "HEAD"])
         async def _login_asset(request: _StarletteRequest):
             sub = request.path_params.get("path", "")
-            try:
+            # Serve real, in-root files (Next.js assets: _next/…, *.svg) directly.
+            # Everything else is a CLIENT-side SPA route owned by the Frontegg
+            # router (/oauth/callback after social login, /account/login, …) and
+            # must receive the app shell so the SDK can handle it client-side.
+            #
+            # We can't rely on StaticFiles raising for unknown paths: the export
+            # ships a 404.html and the mount is html=True, so a missing path is
+            # served AS that 404 page (status 404) instead of raising — which
+            # would break the social-login callback. So we route explicitly.
+            candidate = os.path.realpath(os.path.join(_web_root, sub))
+            in_root = candidate == _web_root_real or candidate.startswith(
+                _web_root_real + os.sep
+            )
+            if sub and in_root and os.path.isfile(candidate):
                 return await _static_mount.get_response(sub, request.scope)
-            except Exception:
-                # SPA fallback — serve index.html for unknown sub-paths.
-                return await _static_mount.get_response("index.html", request.scope)
+            return await _static_mount.get_response("index.html", request.scope)
 
         # llms.txt convention (llmstxt.org): served at the domain root so agents
         # can discover the MCP server's tool surface at
