@@ -630,3 +630,107 @@ class TestHandoffOneTimeUse:
         # consume), so this also succeeds. /oauth/token is the path that
         # consumes the record.
         assert r2.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Feature 030: selected_tenant_id cross-check (FR-008)
+# ---------------------------------------------------------------------------
+
+
+class TestHandoffTenantSelection:
+    def test_matching_selected_tenant_populates_pending(
+        self, app, store, jwt_signer
+    ):
+        # _good_claims carries organization_id="org-A".
+        token = jwt_signer(_good_claims())
+
+        async def run():
+            pending = await _seed_pending(store)
+            body = _good_body(pending.code, token)
+            body["selected_tenant_id"] = "org-A"
+            async with _client(app) as c:
+                r = await c.post(
+                    "/oauth/handoff", json=body, headers=_same_origin_headers()
+                )
+            return r, await store.get_pending(pending.code)
+
+        r, pending_after = asyncio.run(run())
+        assert r.status_code == 200, r.text
+        assert pending_after is not None
+        assert pending_after.frontegg_jwt == token
+
+    def test_mismatched_selected_tenant_returns_tenant_mismatch(
+        self, app, store, jwt_signer
+    ):
+        token = jwt_signer(_good_claims())
+
+        async def run():
+            pending = await _seed_pending(store)
+            body = _good_body(pending.code, token)
+            body["selected_tenant_id"] = "org-DIFFERENT"
+            async with _client(app) as c:
+                r = await c.post(
+                    "/oauth/handoff", json=body, headers=_same_origin_headers()
+                )
+            return r, await store.get_pending(pending.code)
+
+        r, pending_after = asyncio.run(run())
+        assert r.status_code == 400
+        assert r.json()["error"] == "tenant_mismatch"
+        # The pending record MUST NOT be populated on a mismatch.
+        assert pending_after is not None
+        assert pending_after.frontegg_jwt is None
+
+    def test_absent_selected_tenant_is_backward_compatible(
+        self, app, store, jwt_signer
+    ):
+        token = jwt_signer(_good_claims())
+
+        async def run():
+            pending = await _seed_pending(store)
+            async with _client(app) as c:
+                return await c.post(
+                    "/oauth/handoff",
+                    json=_good_body(pending.code, token),  # no selected_tenant_id
+                    headers=_same_origin_headers(),
+                )
+
+        r = asyncio.run(run())
+        assert r.status_code == 200
+
+    def test_empty_selected_tenant_is_rejected_as_invalid_request(
+        self, app, store, jwt_signer
+    ):
+        token = jwt_signer(_good_claims())
+
+        async def run():
+            pending = await _seed_pending(store)
+            body = _good_body(pending.code, token)
+            body["selected_tenant_id"] = ""
+            async with _client(app) as c:
+                return await c.post(
+                    "/oauth/handoff", json=body, headers=_same_origin_headers()
+                )
+
+        r = asyncio.run(run())
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_request"
+
+    def test_token_without_tenant_claim_proceeds(self, app, store, jwt_signer):
+        claims = _good_claims()
+        del claims["organization_id"]  # no recognizable tenant claim
+        token = jwt_signer(claims)
+
+        async def run():
+            pending = await _seed_pending(store)
+            body = _good_body(pending.code, token)
+            body["selected_tenant_id"] = "org-A"
+            async with _client(app) as c:
+                return await c.post(
+                    "/oauth/handoff", json=body, headers=_same_origin_headers()
+                )
+
+        r = asyncio.run(run())
+        # Can't cross-check a token with no tenant claim; JWT validity already
+        # established, so the hand-off proceeds.
+        assert r.status_code == 200

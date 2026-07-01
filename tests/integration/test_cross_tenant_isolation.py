@@ -1,4 +1,4 @@
-"""Integration-style tests for cross-tenant isolation (T024 / FR-005 / FR-008).
+"""Integration-style tests for cross-tenant isolation (FR-005 / FR-008).
 
 Per-request scoping uses a ContextVar; two concurrent asyncio tasks each set
 their own ``SessionCredential`` and then call ``get_okareo_client()`` —
@@ -8,9 +8,9 @@ These tests do NOT stand up a full ASGI server; they exercise the in-process
 boundary (verifier → ContextVar → get_okareo_client → Okareo) which is the
 piece per-request isolation actually depends on.
 
-2026-05-18 pivot: the tenant override is a tenant-scoped JWT, not a header.
-``get_okareo_client`` substitutes that JWT for the credential's JWT when
-constructing the Okareo SDK client; no custom-headers path is exercised.
+Feature 030: tenant selection happens at sign-in, so each session simply
+presents its own (already tenant-scoped) JWT as ``credential.api_key``. There
+is no per-session override; isolation follows directly from the ContextVar.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.auth import tenant_state
 from src.auth.context import (
     SessionCredential,
     _reset_for_tests as _reset_credential,
@@ -32,10 +31,8 @@ from src.auth.context import (
 @pytest.fixture(autouse=True)
 def _isolate():
     _reset_credential()
-    tenant_state._reset_for_tests()
     yield
     _reset_credential()
-    tenant_state._reset_for_tests()
 
 
 class TestConcurrentSessionsDifferentOrgs:
@@ -82,12 +79,12 @@ class TestConcurrentSessionsDifferentOrgs:
         assert sorted(captured_keys) == ["key-ALPHA", "key-BRAVO"]
 
 
-class TestConcurrentSessionsSameOrgIndependentTenantOverride:
-    """Same user, two concurrent MCP sessions, two different `switch_tenant`
-    overrides — each session's Okareo client uses its OWN tenant-scoped JWT
-    (US4 acceptance scenario 4 / SC-011)."""
+class TestConcurrentSessionsSameUserDifferentTenantTokens:
+    """Same user, two concurrent MCP sessions authorized to different
+    organizations at sign-in — each session's Okareo client uses its OWN
+    tenant-scoped JWT (the credential it presents), never the other's."""
 
-    def test_two_sessions_different_override_jwts(self, monkeypatch):
+    def test_two_sessions_different_tenant_scoped_jwts(self, monkeypatch):
         monkeypatch.delenv("OKAREO_API_KEY", raising=False)
         captured_api_keys: list[str] = []
 
@@ -95,46 +92,39 @@ class TestConcurrentSessionsSameOrgIndependentTenantOverride:
             captured_api_keys.append(api_key)
             return MagicMock(name=f"okareo:{api_key}")
 
-        async def task(session_id: str, override_jwt: str, barrier: asyncio.Event):
+        async def task(scoped_jwt: str, tenant_id: str, barrier: asyncio.Event):
             ctx = contextvars.copy_context()
 
             def _setup():
+                # Each session presents its own tenant-scoped JWT (chosen at
+                # sign-in) as the credential api_key.
                 set_session_credential(
                     SessionCredential(
                         kind="oauth",
-                        api_key="shared-default-jwt",
-                        org_id="org-shared",
+                        api_key=scoped_jwt,
+                        org_id=tenant_id,
                         subject="user-1",
                     )
                 )
 
             ctx.run(_setup)
-            # Each session has its OWN override JWT (minted by Frontegg for
-            # its chosen tenant).
-            tenant_state.set_override(session_id, f"tenant-for-{session_id}", override_jwt)
             await barrier.wait()
             from src.okareo_client import get_okareo_client
 
             def _read():
-                with patch(
-                    "src.okareo_client._current_session_id",
-                    return_value=session_id,
-                ):
-                    return get_okareo_client()
+                return get_okareo_client()
 
             return ctx.run(_read)
 
         async def run():
             barrier = asyncio.Event()
             with patch("src.okareo_client.Okareo", side_effect=_fake_okareo):
-                t_a = asyncio.create_task(task("sess-A", "jwt-bound-to-X", barrier))
-                t_b = asyncio.create_task(task("sess-B", "jwt-bound-to-Y", barrier))
+                t_a = asyncio.create_task(task("jwt-bound-to-X", "tenant-X", barrier))
+                t_b = asyncio.create_task(task("jwt-bound-to-Y", "tenant-Y", barrier))
                 await asyncio.sleep(0)
                 barrier.set()
                 await asyncio.gather(t_a, t_b)
 
         asyncio.run(run())
 
-        # Each task constructed an Okareo client with its OWN override JWT
-        # — never the shared default JWT, never the other session's JWT.
         assert sorted(captured_api_keys) == ["jwt-bound-to-X", "jwt-bound-to-Y"]

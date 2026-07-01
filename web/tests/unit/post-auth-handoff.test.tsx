@@ -18,6 +18,8 @@ const h = vi.hoisted(() => ({
 vi.mock("@frontegg/react", () => ({
     useAuth: () => h.auth,
     useLoginWithRedirect: () => h.loginWithRedirect,
+    useAuthActions: () => ({ switchTenant: vi.fn() }),
+    useTenantsState: () => ({ tenants: [] }),
 }));
 
 vi.mock("@/lib/handoff", async (importOriginal) => {

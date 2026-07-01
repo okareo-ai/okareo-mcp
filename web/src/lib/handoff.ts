@@ -14,6 +14,7 @@ export type HandoffError =
     | { kind: "expired"; message: string }            // 400 invalid_grant — pending unknown/expired
     | { kind: "invalid_token"; message: string }      // 400 invalid_token — JWT validation failed
     | { kind: "invalid_request"; message: string }    // 400 invalid_request — bad shape
+    | { kind: "tenant_mismatch"; message: string }    // 400 tenant_mismatch — org ≠ returned credentials
     | { kind: "forbidden"; message: string }          // 403 — CSRF / origin check
     | { kind: "frontegg_unavailable"; message: string }; // 503 / network
 
@@ -24,6 +25,10 @@ export type HandoffRequest = {
     fronteggAccessToken: string;
     fronteggRefreshToken: string;
     fronteggExpiresIn: number;
+    // The organization the user authorized (feature 030). When present the
+    // server verifies it matches the token's tenant claim and rejects a
+    // mismatch. Omitted by the single-tenant path.
+    selectedTenantId?: string;
 };
 
 function mcpBaseUrl(): string {
@@ -53,6 +58,9 @@ export async function postHandoff(req: HandoffRequest): Promise<HandoffResult> {
                 frontegg_access_token: req.fronteggAccessToken,
                 frontegg_refresh_token: req.fronteggRefreshToken,
                 frontegg_expires_in: req.fronteggExpiresIn,
+                ...(req.selectedTenantId
+                    ? { selected_tenant_id: req.selectedTenantId }
+                    : {}),
             }),
         });
     } catch (_err) {
@@ -91,6 +99,11 @@ export async function postHandoff(req: HandoffRequest): Promise<HandoffResult> {
                 return {
                     kind: "invalid_token",
                     message: "Authentication succeeded but the server couldn't validate the returned credentials. Please retry from your copilot.",
+                };
+            case "tenant_mismatch":
+                return {
+                    kind: "tenant_mismatch",
+                    message: "The organization you selected didn't match the credentials returned. Please choose the organization again.",
                 };
             case "invalid_request":
                 return {

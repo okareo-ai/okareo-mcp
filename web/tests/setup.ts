@@ -40,6 +40,12 @@ if (typeof globalThis.ResizeObserver === "undefined") {
     globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
 }
 
+// JSDOM doesn't implement scrollIntoView; Mantine's Combobox calls it on the
+// active option when navigating the list. No-op so combobox tests don't throw.
+if (typeof Element.prototype.scrollIntoView !== "function") {
+    Element.prototype.scrollIntoView = function () {};
+}
+
 afterEach(() => {
     vi.clearAllMocks();
 });

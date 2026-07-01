@@ -1,6 +1,6 @@
 [project]
 name = "okareo-mcp"
-version = "0.0.40" 
+version = "0.0.41" 
 description = "Okareo MCP server for AI model evaluation"
 readme = "README.md"
 license = "Apache-2.0"

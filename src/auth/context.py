@@ -98,21 +98,3 @@ def _reset_for_tests() -> None:
     code MUST NOT call this — request contexts are isolated by design.
     """
     _credential_var.set(None)
-
-
-def get_effective_tenant_id(session_id: str | None) -> str | None:
-    """Resolve the tenant ID downstream Okareo calls should be scoped to.
-
-    Returns the tenant_id from the per-session override set by
-    ``switch_tenant`` when present, else ``None`` so the caller can fall
-    back to whatever the JWT's ``tenantId`` claim says. This is the
-    canonical accessor for code that needs to know the effective tenant
-    without coupling to ``tenant_state`` directly.
-    """
-    if not session_id:
-        return None
-    # Local import keeps the dependency lazy and avoids circular-import
-    # risk during package initialization.
-    from src.auth import tenant_state
-
-    return tenant_state.get_override_tenant_id(session_id)

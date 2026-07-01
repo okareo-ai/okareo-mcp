@@ -727,13 +727,13 @@ tenants.register_tools(mcp)
 
 
 if _HTTP_MODE:
-    # FR-028 dual-eviction backstop: TTL is load-bearing; if the SDK happens
-    # to expose a session-end / disconnect callback, hook into it for an
-    # opportunistic fast-path cleanup. We probe at startup and skip silently
-    # if the surface isn't there — server boot MUST NOT fail on this path.
+    # Opportunistic cleanup: if the SDK exposes a session-end / disconnect
+    # callback, hook into it to drop the per-session tenant-list cache
+    # promptly. TTL eviction is the contract; this is a fast-path. We probe at
+    # startup and skip silently if the surface isn't there — server boot MUST
+    # NOT fail on this path.
     try:
         from src.auth import frontegg_user_info as _frontegg_user_info
-        from src.auth import tenant_state as _tenant_state
 
         # Different mcp[cli] minor versions name this differently. Try a few.
         _hook_attached = False
@@ -741,7 +741,6 @@ if _HTTP_MODE:
             cb = getattr(mcp, attr, None)
             if callable(cb):
                 def _cleanup(session_id: str) -> None:
-                    _tenant_state.clear_session(session_id)
                     _frontegg_user_info.invalidate_cache(session_id)
 
                 cb(_cleanup)  # type: ignore[misc]
@@ -751,7 +750,7 @@ if _HTTP_MODE:
         if not _hook_attached:
             _logger.info(
                 "No FastMCP session-end hook exposed; relying on "
-                "tenant_state TTL eviction (default 30 min) for cleanup."
+                "tenant-list cache TTL eviction for cleanup."
             )
     except Exception as _hook_err:  # pragma: no cover — defensive only
         _logger.warning(

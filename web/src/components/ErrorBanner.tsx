@@ -30,6 +30,8 @@ function messageFor(err: DisplayableError): string {
             return "This sign-in session has expired. Please retry from your copilot.";
         case "invalid_token":
             return "Authentication succeeded but the server couldn't validate the returned credentials. Please retry from your copilot.";
+        case "tenant_mismatch":
+            return "The organization you selected didn't match the credentials returned. Please choose the organization again.";
         case "invalid_request":
             return "Sign-in request was malformed. Please retry from your copilot.";
         case "forbidden":

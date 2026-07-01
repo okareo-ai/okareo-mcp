@@ -474,29 +474,6 @@ async def _handle_auth_code(
             400, "invalid_grant", "Authorization not yet completed by upstream"
         )
 
-    # Cache the refresh token by user_sub so switch_tenant can call
-    # Frontegg's tenant-switch refresh endpoint on the user's behalf
-    # (2026-05-18 architecture pivot). Failures here are non-fatal — the
-    # MCP client still receives its token; switch_tenant will simply tell
-    # the user to re-sign-in if the cache lookup misses later.
-    if pending.frontegg_refresh_token:
-        _capture_refresh_token(pending.frontegg_jwt, pending.frontegg_refresh_token)
-    else:
-        # Loud diagnostic — without a refresh token cached, `switch_tenant`
-        # will fail with `tenant_switch_unavailable` for this user. The most
-        # common cause is the upstream scope list not including
-        # `offline_access`; we now always append it (above), so seeing this
-        # warning post-fix suggests a Frontegg-side configuration issue
-        # (e.g., the Application is set to not issue refresh tokens).
-        print(
-            "[oauth-proxy] WARNING: Frontegg returned NO refresh_token at "
-            "callback; switch_tenant will be unavailable for this user. "
-            "Check Frontegg Application config (refresh tokens must be "
-            "enabled) and verify the upstream scope list includes "
-            "`offline_access`.",
-            file=sys.stderr, flush=True,
-        )
-
     # Token passthrough.
     body = {
         "access_token": pending.frontegg_jwt,
@@ -507,43 +484,6 @@ async def _handle_auth_code(
     if pending.frontegg_refresh_token is not None:
         body["refresh_token"] = pending.frontegg_refresh_token
     return JSONResponse(body)
-
-
-def _capture_refresh_token(access_token: str, refresh_token: str) -> None:
-    """Extract user_sub from a Frontegg-issued JWT and cache the refresh
-    token under it. Never raises — refresh-token capture is best-effort and
-    failures must not break OAuth.
-
-    Logs only the boolean "captured? yes/no" — never the access token or
-    the refresh token themselves.
-    """
-    try:
-        # Local import keeps the module's startup cost low.
-        import jwt as pyjwt  # type: ignore[import-untyped]
-        from src.auth import refresh_token_cache
-
-        claims = pyjwt.decode(
-            access_token, options={"verify_signature": False}
-        )
-        user_sub = claims.get("sub")
-        if not user_sub:
-            print(
-                "[oauth-proxy] refresh-token capture: no `sub` claim on access "
-                "token; tenant switching will fail for this user until they re-sign-in.",
-                file=sys.stderr, flush=True,
-            )
-            return
-        refresh_token_cache.set_token(str(user_sub), refresh_token)
-        print(
-            f"[oauth-proxy] refresh-token captured for sub={user_sub!r}",
-            file=sys.stderr, flush=True,
-        )
-    except Exception as exc:
-        print(
-            f"[oauth-proxy] refresh-token capture failed "
-            f"({type(exc).__name__}); tenant switching may be unavailable.",
-            file=sys.stderr, flush=True,
-        )
 
 
 async def _handle_refresh(form, store: OAuthStateStore, config: ProxyConfig):  # noqa: ARG001
@@ -595,15 +535,6 @@ async def _handle_refresh(form, store: OAuthStateStore, config: ProxyConfig):  #
             file=sys.stderr,
             flush=True,
         )
-    # On success, update the refresh-token cache so subsequent
-    # switch_tenant calls work against the freshly-rotated token. Frontegg
-    # rotates refresh tokens on every refresh by default, so the value we
-    # cached at /oauth/callback may already be invalid by now.
-    if isinstance(body, dict) and 200 <= resp.status_code < 300:
-        new_access = body.get("access_token")
-        new_refresh = body.get("refresh_token")
-        if new_access and new_refresh:
-            _capture_refresh_token(str(new_access), str(new_refresh))
     return JSONResponse(body, status_code=resp.status_code)
 
 

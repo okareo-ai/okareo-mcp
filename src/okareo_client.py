@@ -20,7 +20,6 @@ used only server-side to form downstream Okareo calls.
 
 import inspect
 import os
-import sys
 
 from okareo import Okareo
 
@@ -83,26 +82,11 @@ def get_okareo_client() -> Okareo:
     credential = get_session_credential_optional()
     base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
     if credential is not None:
-        # Per-session tenant override (FR-024, 2026-05-18 pivot): if
-        # switch_tenant has run, use the override's tenant-scoped JWT as
-        # the SDK api_key — that JWT's `tenantId` claim is what the Okareo
-        # backend reads to scope the call. If no override is set, fall back
-        # to the credential's original JWT (the JWT default tenant).
-        from src.auth import tenant_state
-
-        session_id = _current_session_id()
-        override = (
-            tenant_state.get_override(session_id) if session_id else None
-        )
-        effective_key = override.access_token if override is not None else credential.api_key
-        # Diagnostic for tenant-override troubleshooting. Logs only the
-        # session_id and the active tenant_id; never any JWT or api_key.
-        print(
-            f"[tenant] session_id={session_id!r} "
-            f"override_tenant={(override.tenant_id if override else None)!r}",
-            file=sys.stderr, flush=True,
-        )
-        return create_okareo_client(effective_key, base_url)
+        # The organization a call operates against is whatever the presented
+        # credential is scoped to (feature 030): tenant selection happens at
+        # sign-in, so the JWT's own `tenantId` claim is authoritative. There is
+        # no per-session override to consult.
+        return create_okareo_client(credential.api_key, base_url)
 
     api_key = os.environ.get("OKAREO_API_KEY", "").strip()
     if not api_key:

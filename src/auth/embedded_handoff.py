@@ -58,6 +58,11 @@ class EmbeddedHandoffRequest:
     frontegg_access_token: str
     frontegg_refresh_token: str
     frontegg_expires_in: int
+    # Feature 030: the organization the user authorized on the selection
+    # screen. Optional (single-tenant path omits it). When present the route
+    # verifies it matches the JWT's tenant claim (FR-008) and rejects a
+    # mismatch rather than mis-scoping the connection.
+    selected_tenant_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -115,11 +120,20 @@ def _parse_body(payload: dict) -> EmbeddedHandoffRequest | JSONResponse:
             400, "invalid_request", "frontegg_expires_in must be a positive integer"
         )
 
+    selected_tenant_id = payload.get("selected_tenant_id")
+    if selected_tenant_id is not None and (
+        not isinstance(selected_tenant_id, str) or not selected_tenant_id
+    ):
+        return _error(
+            400, "invalid_request", "selected_tenant_id must be a non-empty string"
+        )
+
     return EmbeddedHandoffRequest(
         pending_code=pending_code,
         frontegg_access_token=access_token,
         frontegg_refresh_token=refresh_token,
         frontegg_expires_in=expires_in,
+        selected_tenant_id=selected_tenant_id,
     )
 
 
@@ -272,6 +286,27 @@ async def _validate_frontegg_jwt(
     return True
 
 
+def _tenant_id_from_jwt(token: str) -> str | None:
+    """Read the tenant claim from an already signature-validated JWT.
+
+    Frontegg's tenant claim varies by token-template config; we try the same
+    keys the tools layer uses. Returns None if the token can't be decoded or
+    carries no recognized tenant claim (the route treats None as "cannot
+    cross-check" and proceeds — the JWT's validity is already established).
+    """
+    try:
+        claims = pyjwt.decode(token, options={"verify_signature": False})
+    except pyjwt.InvalidTokenError:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    for key in ("tenantId", "organization_id", "tid", "tenant_id"):
+        value = claims.get(key)
+        if value:
+            return str(value)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Route factory
 # ---------------------------------------------------------------------------
@@ -383,6 +418,33 @@ def make_handoff_route(
                 request,
                 config,
             )
+
+        # 5b. Feature 030 (FR-008): if the page told us which organization the
+        # user authorized, verify the token is actually scoped to it before we
+        # commit. This makes "authorized org ≠ operating org" impossible rather
+        # than silently mis-scoping the connection. A token with no recognizable
+        # tenant claim can't be cross-checked, so we proceed (its validity is
+        # already established) and note it.
+        if body.selected_tenant_id is not None:
+            actual_tenant = _tenant_id_from_jwt(body.frontegg_access_token)
+            if actual_tenant is not None and actual_tenant != body.selected_tenant_id:
+                _logger.warning(
+                    "Handoff rejected: selected_tenant_id != token tenant claim"
+                )
+                return _maybe_add_cors_headers(
+                    _error(
+                        400,
+                        "tenant_mismatch",
+                        "authorized organization does not match the returned credentials",
+                    ),
+                    request,
+                    config,
+                )
+            if actual_tenant is None:
+                _logger.info(
+                    "Handoff: selected_tenant_id present but token carries no "
+                    "tenant claim; proceeding without cross-check."
+                )
 
         # 6. Populate the pending record. The OAuthStateStore method is
         # idempotent-by-failure (returns False on unknown/expired) — we
