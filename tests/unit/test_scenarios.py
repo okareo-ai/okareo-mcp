@@ -357,3 +357,349 @@ class TestCreateScenarioVersionRowCount:
 
         assert result["row_count"] == 3
         assert result["name"] == "my-test-v2"
+
+
+def _jsonl(n, start=0):
+    """Build JSONL text with n input/result rows."""
+    return "".join(
+        json.dumps({"input": f"q{i}", "result": f"a{i}"}) + "\n"
+        for i in range(start, start + n)
+    )
+
+
+_PATCH_UPLOAD_BYTES = "src.tools.scenarios._upload_scenario_from_bytes"
+
+
+class TestSaveScenarioContentPath:
+    """US1 (T005): hosted `content` upload path + 2,000-row threshold guard."""
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_content_uploads_via_bytes_with_row_count(
+        self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
+    ):
+        mock_get_client.return_value = MagicMock()
+        mock_get_scenarios.sync.return_value = []
+        mock_upload.return_value = _make_mock_scenario_response(scenario_count=0)
+
+        result = json.loads(tools["save_scenario"](name="from-content", content=_jsonl(500)))
+
+        assert result["created"] is True
+        assert result["row_count"] == 500
+        # Uploaded via the in-memory BytesIO path with the raw JSONL bytes.
+        mock_upload.assert_called_once()
+        _okareo, name_arg, data_arg, _project = mock_upload.call_args[0]
+        assert name_arg == "from-content"
+        assert isinstance(data_arg, bytes)
+        assert data_arg.count(b"\n") == 500
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_content_at_threshold_is_rejected(
+        self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
+    ):
+        mock_get_client.return_value = MagicMock()
+        mock_get_scenarios.sync.return_value = []
+
+        result = json.loads(tools["save_scenario"](name="too-big", content=_jsonl(2000)))
+
+        assert "error" in result
+        assert "2000" in result["error"]
+        assert "upload it directly to Okareo" in result["error"]
+        mock_upload.assert_not_called()
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_content_just_under_threshold_succeeds(
+        self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
+    ):
+        mock_get_client.return_value = MagicMock()
+        mock_get_scenarios.sync.return_value = []
+        mock_upload.return_value = _make_mock_scenario_response(scenario_count=0)
+
+        result = json.loads(tools["save_scenario"](name="just-ok", content=_jsonl(1999)))
+
+        assert result["created"] is True
+        assert result["row_count"] == 1999
+        mock_upload.assert_called_once()
+
+
+class TestSaveScenarioGuidanceAndErrors:
+    """US2 (T010): actionable errors, mode gating, and byte cap."""
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_malformed_line_rejected(
+        self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
+    ):
+        mock_get_client.return_value = MagicMock()
+        mock_get_scenarios.sync.return_value = []
+
+        bad = _jsonl(2) + "not json at all\n"
+        result = json.loads(tools["save_scenario"](name="bad", content=bad))
+
+        assert "error" in result
+        assert "line 3" in result["error"]
+        mock_upload.assert_not_called()
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_non_object_line_rejected(
+        self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
+    ):
+        mock_get_client.return_value = MagicMock()
+        mock_get_scenarios.sync.return_value = []
+
+        result = json.loads(tools["save_scenario"](name="arr", content='[1, 2, 3]\n'))
+
+        assert "error" in result
+        assert "not a JSON object" in result["error"]
+        mock_upload.assert_not_called()
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_empty_content_rejected(
+        self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
+    ):
+        mock_get_client.return_value = MagicMock()
+        mock_get_scenarios.sync.return_value = []
+
+        result = json.loads(tools["save_scenario"](name="empty", content="   \n  \n"))
+
+        assert "error" in result
+        assert "No rows found" in result["error"]
+        mock_upload.assert_not_called()
+
+    def test_file_path_rejected_in_http_mode(self, tools, monkeypatch):
+        monkeypatch.setenv("TRANSPORT", "streamable-http")
+
+        result = json.loads(tools["save_scenario"](name="hosted", file_path="/tmp/whatever.jsonl"))
+
+        assert "error" in result
+        assert "hosted server" in result["error"]
+        assert "File not found" not in result["error"]
+        assert "content" in result["error"]
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_content_over_byte_cap_rejected(
+        self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
+    ):
+        mock_get_client.return_value = MagicMock()
+        mock_get_scenarios.sync.return_value = []
+
+        from src.tools.scenarios import MAX_INLINE_BYTES
+
+        oversized = "x" * (MAX_INLINE_BYTES + 1)
+        result = json.loads(tools["save_scenario"](name="huge", content=oversized))
+
+        assert "error" in result
+        assert "inline size limit" in result["error"]
+        mock_upload.assert_not_called()
+
+
+class TestSaveScenarioNoRegression:
+    """US3 (T014): stdio file_path and inline rows behave as before."""
+
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_stdio_file_path_uploads_unchanged(
+        self, mock_resolve, mock_get_client, tools, mock_get_scenarios, monkeypatch
+    ):
+        monkeypatch.setenv("TRANSPORT", "stdio")
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_get_scenarios.sync.return_value = []
+        mock_client.upload_scenario_set.return_value = _make_mock_scenario_response(scenario_count=0)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.write('{"input": "q1", "result": "a1"}\n')
+            f.write('{"input": "q2", "result": "a2"}\n')
+            tmp_path = f.name
+
+        result = json.loads(tools["save_scenario"](name="stdio-file", file_path=tmp_path))
+
+        assert result["row_count"] == 2
+        assert result["created"] is True
+        mock_client.upload_scenario_set.assert_called_once()
+
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_rows_path_unchanged(
+        self, mock_resolve, mock_get_client, tools, mock_get_scenarios
+    ):
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_get_scenarios.sync.return_value = []
+        mock_client.create_scenario_set.return_value = _make_mock_scenario_response(scenario_count=0)
+
+        rows = [{"input": "q1", "result": "a1"}, {"input": "q2", "result": "a2"}]
+        result = json.loads(tools["save_scenario"](name="rows-only", rows=rows))
+
+        assert result["row_count"] == 2
+        mock_client.create_scenario_set.assert_called_once()
+
+
+class TestSaveScenarioCardinalityAndIdempotency:
+    """Polish (T016): single-source rejection and idempotent name hit."""
+
+    def test_no_source_rejected(self, tools):
+        result = json.loads(tools["save_scenario"](name="none"))
+        assert "error" in result
+        assert "exactly one" in result["error"]
+
+    def test_multiple_sources_rejected(self, tools):
+        result = json.loads(tools["save_scenario"](
+            name="two", content=_jsonl(1), rows=[{"input": "q", "result": "a"}]
+        ))
+        assert "error" in result
+        assert "only one" in result["error"]
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_existing_name_is_idempotent_no_upload(
+        self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
+    ):
+        mock_get_client.return_value = MagicMock()
+        existing = _make_mock_scenario_response(name="dupe", scenario_count=7)
+        mock_get_scenarios.sync.return_value = [existing]
+
+        result = json.loads(tools["save_scenario"](name="dupe", content=_jsonl(3)))
+
+        assert result["created"] is False
+        assert result["row_count"] == 7
+        mock_upload.assert_not_called()
+
+
+class TestSaveScenarioModeSpecificSchema:
+    """FR-014 / SC-008: the hosted registration must not advertise file_path;
+    the stdio registration must keep it."""
+
+    def _registered_tool(self, monkeypatch, transport):
+        from mcp.server.fastmcp import FastMCP
+
+        from src.tools.scenarios import register_tools
+
+        monkeypatch.setenv("TRANSPORT", transport)
+        mcp = FastMCP("test")
+        register_tools(mcp)
+        return mcp._tool_manager._tools["save_scenario"]
+
+    def test_hosted_schema_has_no_file_path(self, monkeypatch):
+        tool = self._registered_tool(monkeypatch, "streamable-http")
+        assert set(tool.parameters.get("properties", {})) == {
+            "name",
+            "content",
+            "rows",
+            "tags",
+        }
+
+    def test_hosted_description_never_mentions_file_path(self, monkeypatch):
+        tool = self._registered_tool(monkeypatch, "streamable-http")
+        description = tool.description or ""
+        assert "file_path" not in description
+        assert "file path" not in description.lower()
+
+    def test_stdio_schema_still_offers_file_path(self, monkeypatch):
+        tool = self._registered_tool(monkeypatch, "stdio")
+        assert "file_path" in tool.parameters.get("properties", {})
+
+
+class TestSaveScenarioHostedDefensiveRejection:
+    """FR-014 / FR-010b: a hosted client that sends file_path anyway gets
+    actionable feed-rows-directly guidance, and no upload is attempted."""
+
+    def _hosted_tool(self, monkeypatch):
+        from mcp.server.fastmcp import FastMCP
+
+        from src.tools.scenarios import register_tools
+
+        monkeypatch.setenv("TRANSPORT", "streamable-http")
+        mcp = FastMCP("test")
+        register_tools(mcp)
+        return mcp._tool_manager._tools["save_scenario"]
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    def test_file_path_argument_is_dropped_and_rejected_with_guidance(
+        self, mock_upload, monkeypatch
+    ):
+        tool = self._hosted_tool(monkeypatch)
+        # Mimic the MCP call path: pydantic validates the arguments against
+        # the hosted schema (extra="ignore" drops the unknown file_path).
+        validated = tool.fn_metadata.arg_model.model_validate(
+            {"name": "from-old-client", "file_path": "/tmp/data.jsonl"}
+        )
+        passed = validated.model_dump_one_level()
+        assert "file_path" not in passed
+
+        result = json.loads(tool.fn(**passed))
+
+        assert "error" in result
+        assert "not supported on the hosted server" in result["error"]
+        assert "content" in result["error"]
+        assert "upload it directly to Okareo" in result["error"]
+        mock_upload.assert_not_called()
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    def test_impl_backstop_rejects_file_path_in_http_mode(
+        self, mock_upload, monkeypatch
+    ):
+        from src.tools.scenarios import _save_scenario_impl
+
+        monkeypatch.setenv("TRANSPORT", "streamable-http")
+        result = json.loads(
+            _save_scenario_impl(name="direct", file_path="/tmp/data.jsonl")
+        )
+
+        assert "error" in result
+        assert "not available on the hosted server" in result["error"]
+        mock_upload.assert_not_called()
+
+
+class TestSaveScenarioStdioRegression:
+    """FR-009: the stdio surface and guidance are unchanged by the hosted
+    file_path removal."""
+
+    def test_stdio_zero_source_error_lists_all_three_sources(
+        self, tools, monkeypatch
+    ):
+        monkeypatch.setenv("TRANSPORT", "stdio")
+        result = json.loads(tools["save_scenario"](name="none"))
+        assert "content" in result["error"]
+        assert "file_path" in result["error"]
+        assert "rows" in result["error"]
+
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_hosted_rows_path_still_uses_create_scenario_set(
+        self, mock_resolve, mock_get_client, mock_get_scenarios, monkeypatch
+    ):
+        from mcp.server.fastmcp import FastMCP
+
+        from src.tools.scenarios import register_tools
+
+        monkeypatch.setenv("TRANSPORT", "streamable-http")
+        mcp = FastMCP("test")
+        register_tools(mcp)
+        hosted_save = mcp._tool_manager._tools["save_scenario"].fn
+
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_get_scenarios.sync.return_value = []
+        mock_client.create_scenario_set.return_value = _make_mock_scenario_response(
+            scenario_count=0
+        )
+
+        rows = [{"input": "q1", "result": "a1"}]
+        result = json.loads(hosted_save(name="hosted-rows", rows=rows))
+
+        assert result["row_count"] == 1
+        mock_client.create_scenario_set.assert_called_once()

@@ -216,6 +216,7 @@ class CombinedTokenVerifier(TokenVerifier):
             return None
 
         subject = claims.get("sub")
+        email = claims.get("email")
         # API key for downstream Okareo SDK calls: for the OAuth path we
         # forward the JWT itself; the Okareo backend accepts JWTs (issued by
         # Frontegg under the same identity) as authentication.
@@ -235,6 +236,7 @@ class CombinedTokenVerifier(TokenVerifier):
             api_key=api_key_for_sdk,
             org_id=str(org_id),
             subject=str(subject) if subject else None,
+            email=str(email) if email else None,
             scopes=scopes,
             allowed_tenants=allowed_tenants,
         )

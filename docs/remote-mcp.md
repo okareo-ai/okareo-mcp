@@ -190,11 +190,34 @@ For continuity in a resumed chat, ask the LLM to re-issue `switch_tenant` from t
 
 ---
 
+## Working with scenario datasets (JSONL)
+
+On the hosted server, `save_scenario` has **no** `file_path` argument — the
+server runs in the cloud and cannot read files on your machine, so the option
+isn't offered (the local stdio install still has it). Your copilot feeds the
+scenario rows directly instead. How you create a scenario from a `.jsonl` file
+depends on its size:
+
+- **Under 2,000 rows** — have your copilot read the file and pass its contents to
+  `save_scenario` via the `content` argument (raw JSONL text). The server
+  validates it and uploads it for you.
+- **2,000 rows or more** — **save the file locally and upload it directly to
+  Okareo** through the web app, SDK, or CLI. Do **not** ask the copilot to read a
+  large file into the conversation: routing thousands of rows through the
+  assistant wastes tokens, and `save_scenario` will reject a `content` payload at
+  or above the threshold with this guidance.
+
+This keeps large-dataset creation fast and cheap while the small-dataset path
+stays fully conversational.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Copilot prompts for "OAuth client_id" | Copilot doesn't yet implement MCP OAuth discovery | Use the fallback Bearer-header config instead. |
+| `save_scenario` rejects an attempt to pass a file path (the hosted tool doesn't list a `file_path` parameter) | The hosted server can't read your local files, so the parameter isn't offered; a client that sends one anyway falls through to the "provide a dataset source" error | For < 2,000 rows, have the copilot read the file and pass its contents as `content`; for ≥ 2,000 rows, upload the file directly to Okareo (web app / SDK / CLI). |
 | OAuth browser shows "redirect URI not allowed" | Stale browser session against an older config | Clear browser cookies for `tools.okareo.com` and retry. |
 | `list_tenants` returns `tenant_selection_requires_oauth` | The session authenticated via the API-key bearer path | API keys are single-org; either generate a new API key in the desired org, or switch to the OAuth path. |
 | Tools return data for the wrong organization after resume | LLM didn't re-issue `switch_tenant` on conversation resume | Call `list_tenants` to confirm `active_tenant_id`; then `switch_tenant` to the right org. |

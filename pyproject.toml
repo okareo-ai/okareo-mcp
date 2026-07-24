@@ -1,6 +1,6 @@
 [project]
 name = "okareo-mcp"
-version = "0.0.41" 
+version = "0.0.42" 
 description = "Okareo MCP server for AI model evaluation"
 readme = "README.md"
 license = "Apache-2.0"
@@ -19,17 +19,18 @@ classifiers = [
 ]
 dependencies = [
     "mcp[cli]>=1.27",
-    "okareo>=0.0.132,<0.0.133",
+    "okareo>=0.0.144,<0.0.145",
     "httpx",
     "PyJWT[crypto]>=2.9",
     "python-dotenv>=1.0",
+    "langcodes[data]>=3.3",
 ]
 
 [project.urls]
-Homepage = "https://github.com/okareo-ai/okareo-mcp-beta"
+Homepage = "https://github.com/okareo-ai/okareo-mcp-dev"
 Documentation = "https://docs.okareo.com/docs/mcp/introduction"
-Repository = "https://github.com/okareo-ai/okareo-mcp-beta"
-Issues = "https://github.com/okareo-ai/okareo-mcp-beta/issues"
+Repository = "https://github.com/okareo-ai/okareo-mcp-dev"
+Issues = "https://github.com/okareo-ai/okareo-mcp-dev/issues"
 
 [build-system]
 requires = ["setuptools>=64"]

@@ -117,8 +117,11 @@ def register_tools(mcp: FastMCP) -> None:
                 "code" (a deterministic Python class in code_contents).
             output_type: "pass_fail" (boolean verdict), "score" (numeric, e.g.
                 a 1-5 rubric), or "analysis" (free-form qualitative feedback;
-                only valid with check_type="model"). Note: list_checks and
-                get_check report this as output_data_type in the server
+                only valid with check_type="model"). For check_type="code" the
+                server infers pass_fail vs score from the value evaluate()
+                returns (bool vs int/float) — output_type is used only to
+                validate the request, not sent to the server. Note: list_checks
+                and get_check report this as output_data_type in the server
                 vocabulary, where "bool" means pass_fail and "int" means score.
             prompt_template: Required when check_type="model". The judge
                 prompt. Inject the runtime data the judge needs with these
@@ -259,11 +262,11 @@ def register_tools(mcp: FastMCP) -> None:
                     )
             else:
                 # code-based: bypass CodeBasedCheck's inspect.getmodule(),
-                # use low-level API directly
-                code_output_type = "bool" if output_type == "pass_fail" else "int"
+                # use low-level API directly. No "type" is sent — since SDK
+                # 0.0.144 the server infers pass/fail vs score from the value
+                # evaluate() returns.
                 config_dict = {
                     "code_contents": code_contents,
-                    "type": code_output_type,
                 }
                 check_config = CheckCreateUpdateSchemaCheckConfigType0.from_dict(
                     config_dict

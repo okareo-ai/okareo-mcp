@@ -24,6 +24,10 @@ from src.error_handling import format_tool_error
 
 MAPI_BASE_URL = os.environ.get("OKAREO_MAPI_BASE_URL", "https://mapi.okareo.com")
 
+# The docs RAG endpoint responds in 5-15s warm, longer on a cold service, so
+# the read timeout must clear that ceiling. Overridable for cold-start slack.
+DOCS_TIMEOUT_SECONDS = float(os.environ.get("OKAREO_DOCS_TIMEOUT", "45"))
+
 TEMPLATE_NAMES = [
     "basic_scenario",
     "boolean_check_prompt",
@@ -139,11 +143,15 @@ def register_tools(mcp: FastMCP) -> None:
         headers = {"api-key": api_key}
 
         # Docs RAG call
+        # The docs RAG endpoint is slow: 5-15s warm, longer on a cold service.
+        # httpx defaults to 5s per phase, which aborts before a warm response
+        # arrives — so give the read a generous ceiling while keeping connect short.
         try:
             response = httpx.post(
                 f"{MAPI_BASE_URL}/v1/docs",
                 headers=headers,
                 json={"query": query, "mode": mode, "topK": resolved_top_k},
+                timeout=httpx.Timeout(DOCS_TIMEOUT_SECONDS, connect=5.0),
             )
             response.raise_for_status()
         except Exception as e:

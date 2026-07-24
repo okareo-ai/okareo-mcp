@@ -20,7 +20,6 @@ from src.error_handling import format_tool_error
 from src.okareo_client import (
     find_test_runs,
     get_okareo_client,
-    okareo_api_request,
     resolve_project_id,
 )
 
@@ -175,17 +174,26 @@ def register_tools(mcp: FastMCP) -> None:
         ),
     )
     def list_checks(limit: int = 20, all_versions: bool = False) -> str:
-        """List available quality checks that can be used to evaluate model outputs.
+        """List available quality checks, grouped by category.
 
-        Returns checks (both built-in and custom) available in your Okareo account.
-        Each check has a name, description, and output_data_type. output_data_type
-        uses the server vocabulary: "bool" is a pass/fail check and "int" is a
-        scored check — these correspond to output_type "pass_fail" and "score" in
-        create_or_update_check and generate_check.
+        Returns checks (both built-in and custom) available in your Okareo
+        account, organized into `checks_by_category` using the platform's
+        `__category:<Category>` tags; checks with no category appear under
+        `uncategorized`. Select checks from the category matching your task
+        AND modality: voice-specific categories (e.g. voice/audio quality)
+        apply to voice simulations, while checks outside voice-specific
+        categories are generally useful for both chat and voice. A check
+        carrying multiple categories appears under each of them.
+
+        Each check has a name, description, and output_data_type.
+        output_data_type uses the server vocabulary: "bool" is a pass/fail
+        check and "int" is a scored check — these correspond to output_type
+        "pass_fail" and "score" in create_or_update_check and generate_check.
         Use these check names with run_test to evaluate model quality.
 
         Args:
-            limit: Maximum number of checks to return (default 20). Use 0 for no limit.
+            limit: Maximum number of checks to return (default 20), applied to
+                the total before grouping. Use 0 for no limit.
             all_versions: When false (default), returns only the latest version of
                 each check. When true, returns the full version history of every
                 check, each entry annotated with its version number.
@@ -196,35 +204,56 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
-        if not checks:
-            return json.dumps({
-                "checks": [],
-                "count": 0,
-                "message": "No checks available.",
-            })
-
-        result = []
-        for check in checks:
+        entries = []
+        for check in checks or []:
             entry = {
                 "name": _get_attr(check, "name", ""),
                 "description": _get_attr(check, "description", ""),
                 "output_data_type": _get_attr(check, "output_data_type", ""),
             }
-            if all_versions:
-                props = getattr(check, "additional_properties", None)
-                if isinstance(props, dict) and isinstance(props.get("version"), int):
-                    entry["version"] = props["version"]
-            result.append(entry)
+            props = getattr(check, "additional_properties", None)
+            if not isinstance(props, dict):
+                props = {}
+            if all_versions and isinstance(props.get("version"), int):
+                entry["version"] = props["version"]
+            tags = props.get("tags")
+            categories = [
+                t[len("__category:"):].strip()
+                for t in (tags if isinstance(tags, list) else [])
+                if isinstance(t, str) and t.startswith("__category:")
+                and t[len("__category:"):].strip()
+            ]
+            entries.append((entry, categories))
 
-        total = len(result)
+        total = len(entries)
         if limit and limit > 0:
-            result = result[:limit]
+            entries = entries[:limit]
 
-        return json.dumps({
-            "checks": result,
-            "count": len(result),
+        checks_by_category: dict = {}
+        uncategorized: list = []
+        for entry, categories in entries:
+            if categories:
+                for cat in categories:
+                    checks_by_category.setdefault(cat, []).append(entry)
+            else:
+                uncategorized.append(entry)
+
+        response = {
+            "checks_by_category": checks_by_category,
+            "uncategorized": uncategorized,
+            "count": len(entries),
             "total": total,
-        }, default=str)
+            "note": (
+                "Checks are grouped by the platform's __category tags. A check "
+                "with multiple categories appears under each; entries sharing "
+                "a name are the same check. Voice-specific categories apply to "
+                "voice simulations; other categories are generally useful for "
+                "both chat and voice."
+            ),
+        }
+        if not entries:
+            response["message"] = "No checks available."
+        return json.dumps(response, default=str)
 
     @mcp.tool(
         title="Run Test",
@@ -255,7 +284,10 @@ def register_tools(mcp: FastMCP) -> None:
             scenario_name: Name of the scenario to evaluate against.
             model_name: Name of the registered model to evaluate.
             checks: List of check names to apply (e.g., ["coherence", "relevance"]).
-                Use list_checks to discover available checks.
+                Use list_checks to discover available checks and pick from the
+                category matching the task and modality — do not use
+                voice-specific checks for text evaluations (or vice versa);
+                checks outside voice-specific categories suit both.
             name: Optional human-readable name for this test run.
             type: Type of evaluation. Defaults to NL_GENERATION. Valid values:
                 NL_GENERATION, INFORMATION_RETRIEVAL, MULTI_CLASS_CLASSIFICATION,
@@ -1050,12 +1082,7 @@ def register_tools(mcp: FastMCP) -> None:
                 })
 
         try:
-            result = okareo_api_request(
-                okareo,
-                "post",
-                f"/v0/test_runs/{resolved_id}/re_evaluate",
-                json={"check_ids": check_ids},
-            )
+            result = okareo.re_evaluate(str(resolved_id), check_ids)
         except Exception as e:
             return format_tool_error(e)
 
@@ -1063,7 +1090,7 @@ def register_tools(mcp: FastMCP) -> None:
             "test_run_id": str(resolved_id),
             "reevaluated_check_ids": check_ids,
             "original_run_unchanged": True,
-            "result": result,
+            "result": _serialize_value(result),
             "message": (
                 f"Re-evaluated test run against {len(check_ids)} check(s). "
                 "The original run's results are unchanged."

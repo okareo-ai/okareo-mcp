@@ -53,12 +53,7 @@ For clients that haven't shipped the MCP OAuth flow yet, paste your API key as a
 
 ### Working across multiple Okareo organizations
 
-If your Okareo account belongs to more than one organization (tenant), the remote MCP exposes two conversational tools so you don't have to leave the copilot to switch:
-
-- `list_tenants` — show every organization you have access to. Marks which one this session is currently operating against.
-- `switch_tenant(tenant_id)` — change the active organization for subsequent tool calls in this session.
-
-The selection is session-scoped: it lasts as long as the MCP connection stays alive. If you close and reopen the copilot, ask the LLM to re-switch (or just re-issue `switch_tenant` from the resumed conversation). Tenant selection requires the OAuth path; on the API-key fallback path both tools return `tenant_selection_requires_oauth` because each API key is already pinned to one organization.
+If you have access to more than one Okareo account, simply `Clear Authentication` and then re-authenticate with the account you want to work in. You can always ask which account your are in and have acccess to.
 
 ---
 

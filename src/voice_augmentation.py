@@ -10,7 +10,7 @@ extras in `to_dict()`; the openapi-generated
 Also provides pure-function preflight validators for the augmentation
 block: composition rule, per-strategy required-field / range checks,
 unknown-key detection, and offset ordering. All validators return a
-list of error envelopes — empty list means pass.
+list of error envelopes — empty list means pass. 
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from typing import Any, Optional
 
 from attrs import define as _attrs_define
 from okareo.model_under_test import Simulation
-
 # ---------------------------------------------------------------------------
 # AugmentedSimulation — SDK bridge for the new payload keys
 # ---------------------------------------------------------------------------

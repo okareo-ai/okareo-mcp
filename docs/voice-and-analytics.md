@@ -38,11 +38,14 @@ as MCP tools from any connected agent (Claude Code, Cursor, …).
 ## Voice-configured simulation drivers
 
 - `list_driver_voices()` — discover the available voices, voice profiles, and
-  languages.
+  languages. Each voice carries `language`, `accent`, and `gender` metadata —
+  select by that metadata to satisfy language/accent requests (prompt text
+  never changes how the TTS voice sounds).
 - `create_or_update_driver(…, voice=…, voice_profile=…, voice_instructions=…,
   language=…)` — define a simulated user that speaks with a specific voice and
   language. Unknown `voice`/`voice_profile` values are rejected with the valid
-  options listed.
+  options listed. When `language` is omitted it is derived from the selected
+  voice; a conflicting `language` is rejected.
 - Run a simulation with the voice-configured driver via `run_simulation` — each
   driver carries its own audio characteristics.
 

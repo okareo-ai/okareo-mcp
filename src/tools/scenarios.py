@@ -23,6 +23,77 @@ from mcp.types import ToolAnnotations
 from src.error_handling import format_tool_error
 from src.okareo_client import find_test_runs, get_okareo_client, resolve_project_id
 
+# FR-012: the co-pilot ingests datasets below this row count inline; larger
+# datasets are routed to manual upload to avoid unnecessary token cost.
+SCENARIO_ROW_THRESHOLD = 2000
+# FR-011: defensive guard on the inline `content` payload size (bytes).
+MAX_INLINE_BYTES = 4 * 1024 * 1024
+
+_MANUAL_UPLOAD_GUIDANCE = (
+    "Save it locally and upload it directly to Okareo via the web app, SDK, or "
+    "CLI, rather than passing it through the assistant (which incurs unnecessary "
+    "token cost)."
+)
+
+
+def is_http_mode() -> bool:
+    """True in multi-tenant streamable-http mode, where the server has no access
+    to the caller's local filesystem (mirrors the TRANSPORT check in server.py)."""
+    return os.environ.get("TRANSPORT", "stdio") == "streamable-http"
+
+
+def _parse_jsonl_content(content: str) -> "tuple[list[dict], Optional[str]]":
+    """Parse JSONL text into row dicts. Returns (rows, error_message).
+
+    Blank/whitespace-only lines are skipped. Every non-blank line must be a JSON
+    object. On any invalid line or an empty dataset, returns ([], message).
+    """
+    rows: list[dict] = []
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            return [], f"Dataset contains invalid rows: line {lineno} is not valid JSON."
+        if not isinstance(obj, dict):
+            return [], f"Dataset contains invalid rows: line {lineno} is not a JSON object."
+        rows.append(obj)
+    if not rows:
+        return [], "No rows found in the dataset."
+    return rows, None
+
+
+def _upload_scenario_from_bytes(okareo, name: str, data: bytes, project_id):
+    """Upload JSONL bytes as a scenario set without touching the server disk.
+
+    Mirrors Okareo.upload_scenario_set but streams from an in-memory buffer, so
+    the hosted server never needs access to the caller's local file (031).
+    """
+    from io import BytesIO
+    from uuid import UUID
+
+    from okareo_api_client.api.default import (
+        scenario_sets_upload_v0_scenario_sets_upload_post,
+    )
+    from okareo_api_client.models.body_scenario_sets_upload_v0_scenario_sets_upload_post import (  # noqa: E501
+        BodyScenarioSetsUploadV0ScenarioSetsUploadPost,
+    )
+    from okareo_api_client.types import File
+
+    body = BodyScenarioSetsUploadV0ScenarioSetsUploadPost(
+        name=name,
+        project_id=UUID(project_id) if isinstance(project_id, str) else project_id,
+        file=File(file_name=f"{name}.jsonl", payload=BytesIO(data)),
+    )
+    response = scenario_sets_upload_v0_scenario_sets_upload_post.sync(
+        client=okareo.client,
+        api_key=okareo.api_key,
+        body=body,
+    )
+    okareo.validate_response(response)
+    return response
+
 
 def _get_attr(obj, attr, default=None):
     """Get an attribute, returning default if Unset."""
@@ -47,152 +118,281 @@ def _serialize_value(val):
     return str(val)
 
 
+def _save_scenario_impl(
+    name: str,
+    content: Optional[str] = None,
+    file_path: Optional[str] = None,
+    rows: Optional[list[dict]] = None,
+    tags: Optional[list[str]] = None,
+) -> str:
+    """Shared implementation behind the per-mode save_scenario registrations."""
+    from okareo_api_client.api.default import (
+        get_scenario_sets_v0_scenario_sets_get,
+    )
+
+    # FR-006: exactly one dataset source.
+    sources = [n for n, v in (("content", content), ("file_path", file_path), ("rows", rows)) if v]
+    if len(sources) == 0:
+        # FR-014: on the hosted server an unknown file_path argument is dropped
+        # by schema validation before reaching this function, so a zero-source
+        # call is how an old client's file_path attempt lands here.
+        if is_http_mode():
+            return json.dumps({
+                "error": "Provide exactly one dataset source: content (raw "
+                "JSONL text, for datasets under 2,000 rows) or rows (small "
+                "inline datasets). File paths are not supported on the hosted "
+                "server — it cannot read your local files. Read the file and "
+                "pass its text as content (under 2,000 rows); for 2,000 rows "
+                f"or more: {_MANUAL_UPLOAD_GUIDANCE}",
+            })
+        return json.dumps({
+            "error": "Provide exactly one dataset source: content (raw JSONL "
+            "text, preferred for < 2,000 rows), file_path (local .jsonl, any "
+            "size), or rows (small inline datasets).",
+        })
+    if len(sources) > 1:
+        valid = "content or rows" if is_http_mode() else "content, file_path, or rows"
+        return json.dumps({
+            "error": f"Provide only one of {valid} (got: {', '.join(sources)}).",
+        })
+
+    # FR-007/FR-010: file_path cannot work on the hosted server.
+    if file_path and is_http_mode():
+        return json.dumps({
+            "error": "file_path is not available on the hosted server (it has "
+            "no access to your local files). For a dataset under 2,000 rows, "
+            "read the file and pass its contents as `content`. For 2,000 rows "
+            f"or more: {_MANUAL_UPLOAD_GUIDANCE}",
+        })
+
+    if file_path and not os.path.isfile(file_path):
+        return json.dumps({
+            "error": f"File not found: {file_path}",
+        })
+
+    # FR-003/007/008/011/012: validate `content` fully before any upload.
+    content_rows: Optional[list[dict]] = None
+    if content:
+        if len(content.encode("utf-8")) > MAX_INLINE_BYTES:
+            return json.dumps({
+                "error": "Dataset exceeds the inline size limit "
+                f"({MAX_INLINE_BYTES // (1024 * 1024)} MB). {_MANUAL_UPLOAD_GUIDANCE}",
+            })
+        parsed, parse_error = _parse_jsonl_content(content)
+        if parse_error:
+            return json.dumps({"error": parse_error})
+        if len(parsed) >= SCENARIO_ROW_THRESHOLD:
+            return json.dumps({
+                "error": f"This dataset has {len(parsed)} rows "
+                f"(>= {SCENARIO_ROW_THRESHOLD}). {_MANUAL_UPLOAD_GUIDANCE}",
+            })
+        content_rows = parsed
+
+    try:
+        okareo = get_okareo_client()
+        project_id = resolve_project_id(okareo)
+    except Exception as e:
+        return format_tool_error(e)
+
+    # Check for existing scenario with same name (idempotent create)
+    try:
+        scenarios = get_scenario_sets_v0_scenario_sets_get.sync(
+            client=okareo.client,
+            project_id=project_id,
+            api_key=okareo.api_key,
+        )
+        if scenarios and not isinstance(scenarios, Exception):
+            for s in scenarios:
+                if _get_attr(s, "name") == name:
+                    row_count = _get_attr(s, "scenario_count", 0)
+                    return json.dumps({
+                        "name": name,
+                        "id": str(_get_attr(s, "scenario_id", "")),
+                        "project_id": str(_get_attr(s, "project_id", "")),
+                        "tags": _get_attr(s, "tags", []) or [],
+                        "row_count": row_count,
+                        "created_date": str(_get_attr(s, "time_created", "")),
+                        "created": False,
+                        "message": f"Scenario '{name}' already exists with {row_count} rows.",
+                    }, default=str)
+    except Exception as e:
+        return format_tool_error(e)
+
+    # Count rows in JSONL file for accurate row_count in response
+    file_row_count = 0
+    if file_path:
+        with open(file_path) as f:
+            file_row_count = sum(1 for line in f if line.strip())
+
+    # Determine the row_count reported to the caller (FR-003).
+    if content_rows is not None:
+        row_count = len(content_rows)
+    elif file_path:
+        row_count = file_row_count
+    else:
+        row_count = len(rows)
+
+    # Create new scenario
+    try:
+        if content_rows is not None:
+            result = _upload_scenario_from_bytes(
+                okareo, name, content.encode("utf-8"), project_id
+            )
+        elif file_path:
+            result = okareo.upload_scenario_set(
+                name,
+                file_path=file_path,
+            )
+        else:
+            from okareo_api_client.models.scenario_set_create import ScenarioSetCreate
+            from okareo_api_client.models.seed_data import SeedData
+
+            seed_data = [
+                SeedData(input_=row.get("input"), result=row.get("result"))
+                for row in rows
+            ]
+            scenario_set = ScenarioSetCreate(
+                name=name,
+                seed_data=seed_data,
+                project_id=project_id,
+            )
+            result = okareo.create_scenario_set(scenario_set)
+    except Exception as e:
+        return format_tool_error(e)
+
+    # Set tags if provided (SDK ScenarioSetCreate doesn't support tags)
+    result_tags = []
+    if tags:
+        try:
+            from okareo_api_client.api.default import (
+                update_scenario_set_v0_scenario_sets_scenario_id_put,
+            )
+            from okareo_api_client.models.scenario_set_update import ScenarioSetUpdate
+
+            update_body = ScenarioSetUpdate(tags=tags)
+            update_scenario_set_v0_scenario_sets_scenario_id_put.sync(
+                scenario_id=_get_attr(result, "scenario_id"),
+                client=okareo.client,
+                body=update_body,
+                api_key=okareo.api_key,
+            )
+            result_tags = tags
+        except Exception:
+            pass  # Tags update is best-effort; don't fail the create
+
+    return json.dumps({
+        "name": _get_attr(result, "name", name),
+        "id": str(_get_attr(result, "scenario_id", "")),
+        "project_id": str(_get_attr(result, "project_id", project_id)),
+        "tags": result_tags,
+        "row_count": row_count,
+        "created_date": str(_get_attr(result, "time_created", "")),
+        "created": True,
+    }, default=str)
+
+
 def register_tools(mcp: FastMCP) -> None:
     """Register all scenario tools with the FastMCP server."""
 
-    @mcp.tool(
-        title="Save Scenario",
-        annotations=ToolAnnotations(
-            readOnlyHint=False,
-            destructiveHint=False,
-            idempotentHint=True,
-            openWorldHint=False,
-        ),
-    )
-    def save_scenario(
-        name: str,
-        file_path: Optional[str] = None,
-        rows: Optional[list[dict]] = None,
-        tags: Optional[list[str]] = None,
-    ) -> str:
-        """Save a named scenario for use in quality tests.
+    # FR-014: copilots attempt any parameter the schema advertises, so the
+    # hosted registration must not carry `file_path` at all (the hosted server
+    # cannot read the caller's disk). TRANSPORT is fixed for the process
+    # lifetime, so branching at registration is safe.
+    if is_http_mode():
 
-        Provide EITHER file_path (preferred for large datasets) OR rows.
-        When file_path is provided, the file is uploaded directly to Okareo
-        without passing through the LLM context — use this for .jsonl files.
-
-        If a scenario with the same name already exists, the existing scenario
-        is returned (idempotent). Scenarios are immutable after creation — use
-        create_scenario_version to create updated versions.
-
-        Args:
-            name: A unique name for the scenario.
-            file_path: Path to a .jsonl file containing scenario rows. Each line
-                should be a JSON object with 'input' and 'result' fields. Preferred
-                for large datasets to avoid context window limits.
-            rows: List of data rows, each with 'input' (any type) and 'result'
-                (any type). Use for small scenarios (< 20 rows).
-            tags: Optional list of tags for categorizing the scenario.
-        """
-        from okareo_api_client.api.default import (
-            get_scenario_sets_v0_scenario_sets_get,
+        @mcp.tool(
+            title="Save Scenario",
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
         )
+        def save_scenario(
+            name: str,
+            content: Optional[str] = None,
+            rows: Optional[list[dict]] = None,
+            tags: Optional[list[str]] = None,
+        ) -> str:
+            """Save a named scenario for use in quality tests.
 
-        if not file_path and not rows:
-            return json.dumps({
-                "error": "Provide either file_path or rows. "
-                "Use file_path for .jsonl files (preferred for large datasets).",
-            })
+            Provide EXACTLY ONE dataset source: `content` or `rows`. Feed the
+            scenario rows directly — the server cannot read files from your
+            machine.
 
-        if file_path and rows:
-            return json.dumps({
-                "error": "Provide either file_path or rows, not both.",
-            })
+            Choose by size, to avoid unnecessary token cost:
+            - Datasets UNDER 2,000 rows: read the .jsonl file yourself and pass
+              its text as `content` (preferred), or pass `rows` for tiny
+              datasets.
+            - Datasets of 2,000 ROWS OR MORE: do NOT read the file into
+              context. Instead, tell the user to save it locally and upload it
+              directly to Okareo via the web app, SDK, or CLI. Passing a large
+              dataset through the assistant wastes tokens and is rejected.
 
-        if file_path and not os.path.isfile(file_path):
-            return json.dumps({
-                "error": f"File not found: {file_path}",
-            })
+            If a scenario with the same name already exists, the existing
+            scenario is returned (idempotent). Scenarios are immutable after
+            creation — use create_scenario_version to create updated versions.
 
-        try:
-            okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
-        except Exception as e:
-            return format_tool_error(e)
+            Args:
+                name: A unique name for the scenario.
+                content: Raw JSONL text (one JSON object with 'input' and
+                    'result' per line). Preferred for datasets under 2,000
+                    rows. For 2,000+ rows, upload manually instead (see above).
+                rows: List of data rows, each with 'input' (any type) and
+                    'result' (any type). Use for small scenarios (< 20 rows).
+                tags: Optional list of tags for categorizing the scenario.
+            """
+            return _save_scenario_impl(name, content=content, rows=rows, tags=tags)
 
-        # Check for existing scenario with same name (idempotent create)
-        try:
-            scenarios = get_scenario_sets_v0_scenario_sets_get.sync(
-                client=okareo.client,
-                project_id=project_id,
-                api_key=okareo.api_key,
+    else:
+
+        @mcp.tool(
+            title="Save Scenario",
+            annotations=ToolAnnotations(
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        )
+        def save_scenario(
+            name: str,
+            content: Optional[str] = None,
+            file_path: Optional[str] = None,
+            rows: Optional[list[dict]] = None,
+            tags: Optional[list[str]] = None,
+        ) -> str:
+            """Save a named scenario for use in quality tests.
+
+            Provide EXACTLY ONE dataset source: `content`, `file_path`, or
+            `rows`.
+
+            Prefer `file_path` for local .jsonl files — the server reads the
+            file directly, so no rows pass through the assistant's context.
+            When passing rows through the assistant instead, keep the dataset
+            UNDER 2,000 rows (`content` with the file's text, or `rows` for
+            tiny datasets). For 2,000 rows or more, always use `file_path` or
+            upload directly to Okareo via the web app, SDK, or CLI, to avoid
+            unnecessary token cost.
+
+            If a scenario with the same name already exists, the existing
+            scenario is returned (idempotent). Scenarios are immutable after
+            creation — use create_scenario_version to create updated versions.
+
+            Args:
+                name: A unique name for the scenario.
+                content: Raw JSONL text (one JSON object with 'input' and
+                    'result' per line). Only for datasets under 2,000 rows.
+                file_path: Path to a local .jsonl file. Preferred — works for
+                    any size.
+                rows: List of data rows, each with 'input' (any type) and
+                    'result' (any type). Use for small scenarios (< 20 rows).
+                tags: Optional list of tags for categorizing the scenario.
+            """
+            return _save_scenario_impl(
+                name, content=content, file_path=file_path, rows=rows, tags=tags
             )
-            if scenarios and not isinstance(scenarios, Exception):
-                for s in scenarios:
-                    if _get_attr(s, "name") == name:
-                        row_count = _get_attr(s, "scenario_count", 0)
-                        return json.dumps({
-                            "name": name,
-                            "id": str(_get_attr(s, "scenario_id", "")),
-                            "project_id": str(_get_attr(s, "project_id", "")),
-                            "tags": _get_attr(s, "tags", []) or [],
-                            "row_count": row_count,
-                            "created_date": str(_get_attr(s, "time_created", "")),
-                            "created": False,
-                            "message": f"Scenario '{name}' already exists with {row_count} rows.",
-                        }, default=str)
-        except Exception as e:
-            return format_tool_error(e)
-
-        # Count rows in JSONL file for accurate row_count in response
-        file_row_count = 0
-        if file_path:
-            with open(file_path) as f:
-                file_row_count = sum(1 for line in f if line.strip())
-
-        # Create new scenario
-        try:
-            if file_path:
-                result = okareo.upload_scenario_set(
-                    name,
-                    file_path=file_path,
-                )
-            else:
-                from okareo_api_client.models.scenario_set_create import ScenarioSetCreate
-                from okareo_api_client.models.seed_data import SeedData
-
-                seed_data = [
-                    SeedData(input_=row.get("input"), result=row.get("result"))
-                    for row in rows
-                ]
-                scenario_set = ScenarioSetCreate(
-                    name=name,
-                    seed_data=seed_data,
-                    project_id=project_id,
-                )
-                result = okareo.create_scenario_set(scenario_set)
-        except Exception as e:
-            return format_tool_error(e)
-
-        # Set tags if provided (SDK ScenarioSetCreate doesn't support tags)
-        result_tags = []
-        if tags:
-            try:
-                from okareo_api_client.api.default import (
-                    update_scenario_set_v0_scenario_sets_scenario_id_put,
-                )
-                from okareo_api_client.models.scenario_set_update import ScenarioSetUpdate
-
-                update_body = ScenarioSetUpdate(tags=tags)
-                update_scenario_set_v0_scenario_sets_scenario_id_put.sync(
-                    scenario_id=_get_attr(result, "scenario_id"),
-                    client=okareo.client,
-                    body=update_body,
-                    api_key=okareo.api_key,
-                )
-                result_tags = tags
-            except Exception:
-                pass  # Tags update is best-effort; don't fail the create
-
-        return json.dumps({
-            "name": _get_attr(result, "name", name),
-            "id": str(_get_attr(result, "scenario_id", "")),
-            "project_id": str(_get_attr(result, "project_id", project_id)),
-            "tags": result_tags,
-            "row_count": file_row_count if file_path else len(rows),
-            "created_date": str(_get_attr(result, "time_created", "")),
-            "created": True,
-        }, default=str)
 
     @mcp.tool(
         title="List Scenarios",

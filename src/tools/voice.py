@@ -111,13 +111,11 @@ def register_tools(mcp: FastMCP) -> None:
                 "message": "No valid conversations to ingest.",
             })
 
-        payload: dict = {"project_id": str(project_id), "conversations": valid}
-        if mut_id:
-            payload["mut_id"] = str(mut_id)
-
         try:
-            result = okareo_api_request(
-                okareo, "post", "/v0/conversations/ingest", json=payload
+            result = okareo.ingest_conversations(
+                project_id=str(project_id),
+                conversations=valid,
+                mut_id=str(mut_id) if mut_id else None,
             )
         except Exception as e:
             return format_tool_error(e)

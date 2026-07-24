@@ -60,6 +60,36 @@ class TestJWTPath:
         assert credential.org_id == "org-A"
         assert credential.subject == "user-123"
 
+    def test_email_claim_propagates_to_credential(
+        self, make_verifier, jwt_signer, default_claims
+    ):
+        default_claims["email"] = "dev@example.com"
+        verifier = make_verifier()
+        token = jwt_signer(default_claims)
+
+        async def run():
+            await verifier.verify_token(token)
+            return get_session_credential_optional()
+
+        credential = asyncio.run(run())
+        assert credential is not None
+        assert credential.email == "dev@example.com"
+
+    def test_missing_email_claim_yields_none(
+        self, make_verifier, jwt_signer, default_claims
+    ):
+        default_claims.pop("email", None)
+        verifier = make_verifier()
+        token = jwt_signer(default_claims)
+
+        async def run():
+            await verifier.verify_token(token)
+            return get_session_credential_optional()
+
+        credential = asyncio.run(run())
+        assert credential is not None
+        assert credential.email is None
+
     def test_wrong_aud_returns_none(self, make_verifier, jwt_signer, default_claims):
         default_claims["aud"] = "https://malicious.example"
         verifier = make_verifier()

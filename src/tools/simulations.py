@@ -228,6 +228,21 @@ def _profile_name_set(profiles) -> set:
     return names
 
 
+def _voice_language(voices, voice: str):
+    """Return the catalog language of the voice matching *voice*, or None.
+
+    Matches against the same candidate identifier keys used for voice
+    validation, so any accepted `voice` value resolves consistently.
+    """
+    for v in voices:
+        if not isinstance(v, dict):
+            continue
+        if any(v.get(k) == voice for k in _VOICE_ID_KEYS):
+            lang = v.get("language")
+            return lang if isinstance(lang, str) and lang else None
+    return None
+
+
 # --- Long-running simulation buffering (spec 025-long-running-simulations) ---
 # run_test executes synchronously on the backend and *survives client
 # disconnect*: the backend handler runs to completion in its own threadpool
@@ -468,21 +483,23 @@ def register_tools(mcp: FastMCP) -> None:
         max_parallel_requests: Optional[int] = None,
         # Voice fields
         edge_type: Optional[str] = None,
-        model: Optional[str] = None,
-        output_voice: Optional[str] = None,
-        instructions: Optional[str] = None,
         # Voice Twilio fields
         to_phone_number: Optional[str] = None,
         account_sid: Optional[str] = None,
         auth_token: Optional[str] = None,
         from_phone_number: Optional[str] = None,
+        # Voice SIP fields
+        sip_uri: Optional[str] = None,
+        sip_username: Optional[str] = None,
+        sip_password: Optional[str] = None,
     ) -> str:
         """Create or update a Target — the AI system you want to evaluate in a simulation.
 
         Calling create_or_update_target with the same name as an existing Target will
         **fully replace** its configuration — caller must re-specify all desired fields.
         Supported types: 'generation' (foundation model), 'custom_endpoint' (your own
-        REST API), and 'voice' (voice-based targets via OpenAI, Deepgram, or Twilio).
+        REST API), and 'voice' (voice-based targets reached by phone via Twilio or
+        over SIP).
 
         **Cloning workflow**: this tool accepts the same key structure that `get_target`
         returns, so you can read an existing Target, change `name`, swap in real values
@@ -538,11 +555,8 @@ def register_tools(mcp: FastMCP) -> None:
             max_parallel_requests: (custom_endpoint, twilio) Concurrency limit. This is
                 the same setting the Okareo web UI labels "max concurrency".
 
-            edge_type: (voice targets) Voice provider — 'openai', 'deepgram',
-                or 'twilio'.
-            model: (voice openai/deepgram) Model identifier.
-            output_voice: (voice openai/deepgram) Voice identifier.
-            instructions: (voice openai/deepgram) Voice interaction instructions.
+            edge_type: (voice targets) How Okareo reaches the voice agent —
+                'twilio' (dial a phone number) or 'sip' (call a SIP URI).
 
             to_phone_number: (voice twilio) Destination phone number (required).
             account_sid: (voice twilio, custom only) Twilio account SID. If provided,
@@ -552,6 +566,14 @@ def register_tools(mcp: FastMCP) -> None:
                 account_sid and from_phone_number.
             from_phone_number: (voice twilio, custom only) Caller phone number. Required
                 with account_sid and auth_token.
+
+            sip_uri: (voice sip) Destination SIP URI (required), e.g.
+                "sip:agent@your-domain.example.com". Use this to test any voice
+                agent reachable over SIP — for example one fronted by Daily,
+                Vapi, LiveKit, or a SIP trunk.
+            sip_username: (voice sip, optional) SIP authentication username.
+            sip_password: (voice sip, optional) SIP authentication password
+                (stored as a sensitive field).
         """
         from src.target_redaction import find_sentinel_paths
 
@@ -572,14 +594,14 @@ def register_tools(mcp: FastMCP) -> None:
                 "user_prompt_template": user_prompt_template,
                 "dialog_template": dialog_template,
                 "tools": tools,
-                "model": model,
-                "output_voice": output_voice,
-                "instructions": instructions,
                 "edge_type": edge_type,
                 "to_phone_number": to_phone_number,
                 "account_sid": account_sid,
                 "auth_token": auth_token,
                 "from_phone_number": from_phone_number,
+                "sip_uri": sip_uri,
+                "sip_username": sip_username,
+                "sip_password": sip_password,
             }.items()
             if v is not None
         }
@@ -648,11 +670,14 @@ def register_tools(mcp: FastMCP) -> None:
                     "error": "edge_type is required for voice targets.",
                 })
             if edge_type in ("openai", "deepgram"):
-                if not model or not output_voice:
-                    return json.dumps({
-                        "error": "model and output_voice are required for openai/deepgram voice targets.",
-                    })
-            elif edge_type == "twilio":
+                return json.dumps({
+                    "error": (
+                        f"Voice target type '{edge_type}' is no longer "
+                        "supported. Supported voice target types: 'twilio' "
+                        "(phone), 'sip'."
+                    ),
+                })
+            if edge_type == "twilio":
                 if not to_phone_number:
                     return json.dumps({
                         "error": "to_phone_number is required for twilio voice targets.",
@@ -668,19 +693,23 @@ def register_tools(mcp: FastMCP) -> None:
                     return json.dumps({
                         "error": "Custom Twilio requires account_sid, auth_token, and from_phone_number together.",
                     })
+            elif edge_type == "sip":
+                if not sip_uri:
+                    return json.dumps({
+                        "error": "sip_uri is required for sip voice targets.",
+                    })
             else:
                 return json.dumps({
-                    "error": "edge_type must be 'openai', 'deepgram', or 'twilio'.",
+                    "error": "edge_type must be 'twilio' or 'sip'.",
                 })
 
         # --- Build target implementation ---
         from okareo.model_under_test import (
             CustomEndpointTarget,
-            DeepgramVoiceTarget,
             EndSessionConfig,
             GenerationModel,
-            OpenAIVoiceTarget,
             SessionConfig,
+            SipTarget,
             Target,
             TurnConfig,
             TwilioVoiceTarget,
@@ -777,24 +806,19 @@ def register_tools(mcp: FastMCP) -> None:
             )
 
         elif type == "voice":
-            if edge_type == "openai":
-                target_impl = OpenAIVoiceTarget(
-                    model=model,
-                    output_voice=output_voice,
-                    instructions=instructions or "Be brief and helpful.",
-                )
-            elif edge_type == "deepgram":
-                target_impl = DeepgramVoiceTarget(
-                    model=model,
-                    output_voice=output_voice,
-                    instructions=instructions or "Be brief and helpful.",
-                )
-            elif edge_type == "twilio":
+            if edge_type == "twilio":
                 target_impl = TwilioVoiceTarget(
                     to_phone_number=to_phone_number,
                     account_sid=account_sid or "",
                     auth_token=auth_token or "",
                     from_phone_number=from_phone_number or "",
+                    max_parallel_requests=max_parallel_requests,
+                )
+            elif edge_type == "sip":
+                target_impl = SipTarget(
+                    sip_uri=sip_uri,
+                    sip_username=sip_username,
+                    sip_password=sip_password,
                     max_parallel_requests=max_parallel_requests,
                 )
 
@@ -808,6 +832,8 @@ def register_tools(mcp: FastMCP) -> None:
             create_kwargs = {}
             if type == "voice" and edge_type == "twilio":
                 create_kwargs["sensitive_fields"] = TWILIO_SENSITIVE_FIELDS
+            elif type == "voice" and edge_type == "sip" and sip_password:
+                create_kwargs["sensitive_fields"] = ["sip_password"]
             elif type == "custom_endpoint" and auth_params:
                 create_kwargs["sensitive_fields"] = _build_custom_endpoint_sensitive_fields(
                     auth_params, sensitive_fields
@@ -1152,9 +1178,26 @@ def register_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Define a simulated user persona that will interact with your target.
 
-        Creates or updates a Driver by name (upsert). The prompt_template is the full
-        persona definition — include the persona's role, objectives, tactics, and
-        behavioural constraints.
+        Creates or updates a Driver by name (upsert). Author ONLY the core
+        persona sections in prompt_template, in this order:
+
+        - `## Persona` — who the simulated user is (static character).
+        - `## Scenario Details` — contains the scenario reference
+          (`{scenario_input}` or a specific path like
+          `{scenario_input.objectives}`), placed immediately before
+          Objectives. This is how each scenario row's data reaches the
+          conversation.
+        - `## Objectives` — WHAT the driver is trying to accomplish, written
+          from the driver's goal (not from scenario variables).
+        - `## Soft Tactics` — HOW the driver probes, escalates, and stops.
+
+        Do NOT author Hard Rules, a Turn-End Checklist, or Conversation
+        Behavior sections: the MCP automatically appends the platform's
+        canonical versions of those blocks (including the language rule
+        matching `language`) — the same blocks the Okareo UI appends to
+        generated drivers. Any caller-authored variant of these sections is
+        replaced by the canonical text, and repeated updates never duplicate
+        the blocks.
 
         For voice agents, configure how the simulated user speaks with `voice`,
         `voice_profile`, `voice_instructions`, and `language`. Call
@@ -1162,8 +1205,9 @@ def register_tools(mcp: FastMCP) -> None:
 
         Args:
             name: Unique name for this driver.
-            prompt_template: Full driver persona prompt describing the simulated user's
-                role, primary objectives, conversational tactics, and hard rules.
+            prompt_template: The core persona prompt (Persona, Scenario
+                Details, Objectives, Soft Tactics — see above). Hard Rules and
+                Conversation Behavior are appended automatically.
             model_id: Foundation model to power the driver (defaults to project default).
             temperature: Response randomness, default 0.6.
             voice_instructions: Free-text speaking instructions for voice simulations
@@ -1172,7 +1216,14 @@ def register_tools(mcp: FastMCP) -> None:
                 against the catalog from list_driver_voices.
             voice: Voice identifier for voice simulations. Validated against the
                 catalog from list_driver_voices.
-            language: Language for voice simulations (e.g. "en-US", "es-ES").
+            language: Language the driver responds in, as the bare ISO code
+                the voice catalog serves (e.g. "en", "es", "ja"); regional
+                variants like "fr-CA" are accepted when their base code
+                matches the voice's language. When a `voice` is set and
+                language is omitted, it is derived from that voice's catalog
+                language (disclosed as `language_derived_from_voice` in the
+                response); a value conflicting with the voice's language is
+                rejected. Also drives the appended Hard Rules language rule.
         """
         if not name:
             return json.dumps({"error": "name is required."})
@@ -1188,6 +1239,7 @@ def register_tools(mcp: FastMCP) -> None:
         # caught here rather than producing an unusable driver (FR-032). The
         # catalog being unavailable is non-fatal — validation is skipped and
         # the value passes through.
+        language_derived_from_voice = None
         if voice or voice_profile:
             try:
                 catalog = _fetch_voice_catalog(okareo)
@@ -1210,6 +1262,30 @@ def register_tools(mcp: FastMCP) -> None:
                         "error": f"Unknown voice_profile '{voice_profile}'.",
                         "available_voice_profiles": sorted(profile_names),
                     })
+                # The voice is the source of truth for language (spec 032
+                # E7): derive `language` when omitted, reject a base-code
+                # conflict — a mismatched driver would hard-rule itself into
+                # a language its TTS voice doesn't speak.
+                if voice:
+                    voice_lang = _voice_language(catalog["voices"], voice)
+                    if voice_lang:
+                        if language is None:
+                            language = voice_lang
+                            language_derived_from_voice = voice_lang
+                        elif (
+                            language.split("-")[0].lower()
+                            != voice_lang.split("-")[0].lower()
+                        ):
+                            return json.dumps({
+                                "error": (
+                                    f"language '{language}' conflicts with "
+                                    f"voice '{voice}', whose catalog "
+                                    f"language is '{voice_lang}'. Omit "
+                                    "language to derive it from the voice, "
+                                    "or pick a voice matching the desired "
+                                    "language via list_driver_voices."
+                                ),
+                            })
 
         # Auto-prefix bare mustache references with scenario_input.
         prompt_template = _prefix_template_vars(prompt_template)
@@ -1223,9 +1299,20 @@ def register_tools(mcp: FastMCP) -> None:
                     "prompt_template must embed at least one scenario_input "
                     "reference so the driver is seeded from the scenario. Use "
                     "{scenario_input} for the whole input or "
-                    "{scenario_input.property.path} for a specific field."
+                    "{scenario_input.property.path} for a specific field — "
+                    "place it in a '## Scenario Details' section right before "
+                    "'## Objectives'."
                 ),
             })
+
+        # Parity with UI driver generation (spec 032 E6): append the
+        # platform's canonical Hard Rules + Conversation Behavior blocks.
+        # Idempotent — existing canonical sections are stripped first, so
+        # updates never double-append and caller-authored variants of these
+        # sections are replaced by the canonical text.
+        from src.driver_blocks import append_canonical_blocks
+
+        prompt_template = append_canonical_blocks(prompt_template, language)
 
         # POST /v0/driver directly: the published SDK's Driver dataclass has no
         # `language` field, so it cannot carry voice language through
@@ -1264,7 +1351,16 @@ def register_tools(mcp: FastMCP) -> None:
             "voice": result.get("voice", voice),
             "language": result.get("language", language),
             "created": True,
-            "message": f"Driver '{name}' saved.",
+            "canonical_blocks_appended": True,
+            "message": (
+                f"Driver '{name}' saved. The platform's canonical Hard Rules "
+                "and Conversation Behavior blocks were appended to the prompt."
+            ),
+            **(
+                {"language_derived_from_voice": language_derived_from_voice}
+                if language_derived_from_voice
+                else {}
+            ),
         }, default=str)
 
     @mcp.tool(
@@ -1409,6 +1505,22 @@ def register_tools(mcp: FastMCP) -> None:
         Call this before create_or_update_driver when building a voice agent
         simulation, so you can pass valid `voice`, `voice_profile`, and
         `language` values.
+
+        Each entry in `voices` carries selection metadata — use it to pick
+        the voice:
+        - `language`: bare ISO code (e.g. "en", "es", "ja"). The driver's
+          `language` is derived from the selected voice's language when
+          omitted, and must not conflict with it.
+        - `accent`: free-text accent label present on many voices (e.g.
+          "British", "Mexican", "Parisian", "Southern US"). To satisfy an
+          accent request, select a voice whose `accent` matches — writing
+          accent instructions into `voice_instructions` does NOT change the
+          TTS voice.
+        - `gender`: e.g. "feminine" / "masculine".
+
+        `voice_profiles` are emotion/delivery presets (happy, angry,
+        sarcastic, ...) — they shape affect, not accent or language.
+        `languages` lists the distinct voice languages available.
         """
         try:
             okareo = get_okareo_client()
@@ -1469,6 +1581,10 @@ def register_tools(mcp: FastMCP) -> None:
         omitted and based_on_run_id is provided, they will be resolved from the
         original run.
 
+        For custom_endpoint Targets: an exception raised during the run (for
+        example the endpoint erroring mid-conversation) FAILS the run — it is
+        reported as a failed simulation, not silently skipped.
+
         **Voice augmentations** — for voice Targets, the `augmentation` parameter
         applies realistic acoustic and conversational effects. Six top-level keys:
         `cap`, `directed_speech`, `secondary_speaker`, `backchannel`, `barge_in`,
@@ -1506,7 +1622,15 @@ def register_tools(mcp: FastMCP) -> None:
                 is provided and the original run's target can be resolved.
             driver_name: Name of the driver persona. If omitted, the project default
                 driver is used.
-            checks: List of check names to apply (from list_checks).
+            checks: List of check names to apply (from list_checks). Pick from
+                the list_checks category matching the task and modality —
+                voice-specific categories for voice simulations, categories
+                outside them for either modality; never chat-only checks for
+                audio (or vice versa). Every simulation runs with at least one
+                check: when omitted or empty, the benign code-based "latency"
+                performance check is applied automatically and the response
+                discloses the substitution via `default_check_applied`.
+                Supplied checks are used unchanged.
             repeats: Number of times to run each scenario row, default 1.
             max_turns: Maximum conversation turns per simulation, default 5.
             first_turn: Who speaks first — 'target' or 'driver', default 'target'.
@@ -1517,9 +1641,15 @@ def register_tools(mcp: FastMCP) -> None:
                 dict is treated as no augmentation.
             turn_transition_time: Milliseconds of pause between turns. Forwarded to
                 the backend as-is; SDK default (1000) is used when omitted.
-            silence_timeout_ms: Milliseconds of silence before the simulator
-                advances. Forwarded to the backend; backend default is used when
-                omitted.
+            silence_timeout_ms: The target reply timeout — how patient Okareo
+                is before indicating that the target can't respond. Do NOT set
+                or change this value unless the user specifically directs it;
+                it should be 10000 ms in nearly all cases. It exists to
+                accommodate untuned targets with very long tool calls, during
+                which the Driver waits patiently. It does NOT change how fast
+                Okareo responds, and lowering it does not speed anything up —
+                a slow simulation is not a reason to change it. Forwarded to
+                the backend; backend default is used when omitted.
             checks_at_every_turn: When True, checks are evaluated per turn (not
                 only at end of run).
             stop_check: Early-stop config: `{"check_name": str, "stop_on": <value>}`.
@@ -1709,6 +1839,15 @@ def register_tools(mcp: FastMCP) -> None:
                 ),
             })
 
+        # Every simulation runs with at least one check (spec 032 E2): a
+        # check-less run yields nothing scored and reads as a broken run.
+        # With no checks supplied, apply the benign code-based "latency"
+        # check and disclose the substitution in the response.
+        default_check_applied = None
+        if not checks:
+            checks = ["latency"]
+            default_check_applied = "latency"
+
         # Get provider keys from lifespan context (set at server startup by
         # key_registry.scan_provider_keys()).
         key_registry = {}
@@ -1717,11 +1856,13 @@ def register_tools(mcp: FastMCP) -> None:
             if lifespan_ctx and isinstance(lifespan_ctx, dict):
                 key_registry = dict(lifespan_ctx.get("key_registry", {}))
 
-        # The SDK's Simulation dataclass does not carry `augmentation` or
-        # `silence_timeout_ms`. When either is set, bypass okareo.run_simulation
-        # and call mut.run_test directly with an AugmentedSimulation that
-        # emits the extras through the openapi client's additional_properties
-        # (see specs/023-tool-fixes/research.md R1, R4).
+        # SDK 0.0.144's Simulation dataclass carries `augmentation` natively,
+        # but still not `silence_timeout_ms` — and this bypass also performs
+        # the voice-target preflight (augmentation on a non-voice target is
+        # rejected with a targeted error) that okareo.run_simulation does not.
+        # Both extras therefore keep routing through mut.run_test with an
+        # AugmentedSimulation (see specs/023-tool-fixes/research.md R1, R4 and
+        # specs/032-mcp-guidance-fixes/capability-review.md).
         use_augmented_path = (
             augmentation is not None or silence_timeout_ms is not None
         )
@@ -1906,6 +2047,18 @@ def register_tools(mcp: FastMCP) -> None:
             name=name,
         )
         if status == "failed":
+            # If the auto-applied default check is what the backend rejected,
+            # name it — a simulation must never silently run check-less.
+            if default_check_applied and "check" in str(payload_obj).lower():
+                return json.dumps({
+                    "error": (
+                        f"The default '{default_check_applied}' check was "
+                        "auto-applied (simulations require at least one "
+                        "check) but the backend rejected it: "
+                        f"{payload_obj}. Pass an explicit `checks` list from "
+                        "list_checks."
+                    ),
+                })
             return format_tool_error(payload_obj, key_registry)
 
         extra = {
@@ -1917,6 +2070,14 @@ def register_tools(mcp: FastMCP) -> None:
         }
         if resolved_driver_name:
             extra["driver"] = resolved_driver_name
+        if default_check_applied:
+            extra["default_check_applied"] = default_check_applied
+            extra["default_check_note"] = (
+                "No checks were supplied, so the benign 'latency' performance "
+                "check was applied — every simulation runs with at least one "
+                "check. Pass an explicit `checks` list (see list_checks) to "
+                "evaluate quality."
+            )
 
         response = _build_handoff_response(
             status, payload_obj, run_id, app_link,

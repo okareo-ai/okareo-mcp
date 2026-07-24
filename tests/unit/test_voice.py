@@ -32,15 +32,15 @@ def set_api_key(monkeypatch):
 # ---------------------------------------------------------------------------
 
 class TestIngestConversations:
-    @patch("src.tools.voice.okareo_api_request")
     @patch("src.tools.voice.resolve_project_id")
     @patch("src.tools.voice.get_okareo_client")
     def test_transcript_conversation_accepted(
-        self, mock_client, mock_resolve, mock_request, tools
+        self, mock_client, mock_resolve, tools
     ):
-        mock_client.return_value = MagicMock()
+        okareo = MagicMock()
+        okareo.ingest_conversations.return_value = {"datapoints_created": 2}
+        mock_client.return_value = okareo
         mock_resolve.return_value = "proj-1"
-        mock_request.return_value = {"datapoints_created": 2}
 
         result = json.loads(tools["ingest_conversations"](conversations=[
             {
@@ -55,22 +55,19 @@ class TestIngestConversations:
 
         assert result["accepted"] == 1
         assert result["rejected"] == []
-        method, path = mock_request.call_args[0][1], mock_request.call_args[0][2]
-        assert method == "post"
-        assert path == "/v0/conversations/ingest"
-        payload = mock_request.call_args[1]["json"]
-        assert payload["project_id"] == "proj-1"
-        assert "mut_id" not in payload
+        call = okareo.ingest_conversations.call_args
+        assert call.kwargs["project_id"] == "proj-1"
+        assert call.kwargs["mut_id"] is None
 
-    @patch("src.tools.voice.okareo_api_request")
     @patch("src.tools.voice.resolve_project_id")
     @patch("src.tools.voice.get_okareo_client")
     def test_audio_reference_conversation_accepted(
-        self, mock_client, mock_resolve, mock_request, tools
+        self, mock_client, mock_resolve, tools
     ):
-        mock_client.return_value = MagicMock()
+        okareo = MagicMock()
+        okareo.ingest_conversations.return_value = {"datapoints_created": 1}
+        mock_client.return_value = okareo
         mock_resolve.return_value = "proj-1"
-        mock_request.return_value = {"datapoints_created": 1}
 
         result = json.loads(tools["ingest_conversations"](
             conversations=[
@@ -80,17 +77,17 @@ class TestIngestConversations:
         ))
 
         assert result["accepted"] == 1
-        assert mock_request.call_args[1]["json"]["mut_id"] == "mut-9"
+        assert okareo.ingest_conversations.call_args.kwargs["mut_id"] == "mut-9"
 
-    @patch("src.tools.voice.okareo_api_request")
     @patch("src.tools.voice.resolve_project_id")
     @patch("src.tools.voice.get_okareo_client")
     def test_partial_batch_rejects_invalid_only(
-        self, mock_client, mock_resolve, mock_request, tools
+        self, mock_client, mock_resolve, tools
     ):
-        mock_client.return_value = MagicMock()
+        okareo = MagicMock()
+        okareo.ingest_conversations.return_value = {"datapoints_created": 1}
+        mock_client.return_value = okareo
         mock_resolve.return_value = "proj-1"
-        mock_request.return_value = {"datapoints_created": 1}
 
         result = json.loads(tools["ingest_conversations"](conversations=[
             {"call_id": "ok", "transcript": [{"role": "user", "content": "hi"}]},
@@ -102,7 +99,8 @@ class TestIngestConversations:
         rejected_indices = {r["index"] for r in result["rejected"]}
         assert rejected_indices == {1, 2}
         # The valid conversation was still sent.
-        assert len(mock_request.call_args[1]["json"]["conversations"]) == 1
+        call = okareo.ingest_conversations.call_args
+        assert len(call.kwargs["conversations"]) == 1
 
     @patch("src.tools.voice.resolve_project_id")
     @patch("src.tools.voice.get_okareo_client")

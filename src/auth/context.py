@@ -40,6 +40,10 @@ class SessionCredential:
     api_key: str
     org_id: str
     subject: str | None = None
+    # User email from the Frontegg JWT `email` claim (OAuth path only).
+    # Consumed by analytics for PostHog person identification; never sent
+    # to the Okareo backend. None on the API-key path.
+    email: str | None = None
     expires_at: datetime | None = None
     scopes: tuple[str, ...] = field(default_factory=lambda: ("okareo:use",))
     # Optional set of tenant IDs the user is allowed to switch into, as

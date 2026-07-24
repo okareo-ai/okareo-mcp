@@ -846,9 +846,9 @@ class TestStreamingValidation:
         result = json.loads(tools["create_or_update_target"](
             name="voice-with-streaming",
             type="voice",
-            edge_type="openai",
-            model="gpt-4o-realtime",
-            output_voice="alloy",
+            edge_type="twilio",
+            to_phone_number="+15551234567",
+            max_parallel_requests=1,
             next_message_params={
                 "url": "https://example.com",
                 "method": "POST",

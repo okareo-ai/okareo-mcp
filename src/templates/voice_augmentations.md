@@ -27,8 +27,8 @@ OK:   {"barge_in": {...}, "noise": {...}}   # noise + one
 REJECT: {"cap": {...}, "barge_in": {...}}   # two non-noise — error
 ```
 
-Augmentations apply **only to voice Targets** (edge types: openai, deepgram,
-twilio). Calls against generation or custom_endpoint Targets with an
+Augmentations apply **only to voice Targets** (edge types: twilio, sip).
+Calls against generation or custom_endpoint Targets with an
 `augmentation` block are rejected.
 
 ## Strategy reference
@@ -171,7 +171,13 @@ All preflight errors return without making any network call to the backend.
 These are documented here because users tuning realism often want them together:
 
 - `turn_transition_time` — ms of pause between turns (default 1000).
-- `silence_timeout_ms` — ms of silence before the simulator advances.
+- `silence_timeout_ms` — the target reply timeout: how patient Okareo is
+  before indicating that the target can't respond. Do NOT set or change this
+  value unless the user specifically directs it; it should be 10000 ms in
+  nearly all cases. It exists to accommodate untuned targets with very long
+  tool calls, during which the Driver waits patiently. It does NOT change how
+  fast Okareo responds, and lowering it does not speed anything up — a slow
+  simulation is not a reason to change it.
 - `checks_at_every_turn` — evaluate checks per turn instead of at end-of-run.
 - `stop_check` — `{"check_name": str, "stop_on": <value>}` halts the run when
   the named check returns the configured value.

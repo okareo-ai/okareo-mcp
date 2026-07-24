@@ -92,12 +92,11 @@ def _check_brief(name, check_id):
 
 
 class TestReevaluateTestRun:
-    @patch("src.tools.tests.okareo_api_request")
     @patch("src.tools.tests._find_test_run")
     @patch("src.tools.tests.resolve_project_id")
     @patch("src.tools.tests.get_okareo_client")
     def test_reevaluate_with_explicit_checks(
-        self, mock_client, mock_resolve, mock_find, mock_request, monkeypatch
+        self, mock_client, mock_resolve, mock_find, monkeypatch
     ):
         monkeypatch.setenv("OKAREO_API_KEY", "k")
         okareo = MagicMock()
@@ -105,10 +104,10 @@ class TestReevaluateTestRun:
             _check_brief("coherence", "id-coh"),
             _check_brief("tone", "id-tone"),
         ]
+        okareo.re_evaluate.return_value = {"reevaluated": True}
         mock_client.return_value = okareo
         mock_resolve.return_value = "proj-1"
         mock_find.return_value = {"id": "run-1", "status": "FINISHED"}
-        mock_request.return_value = {"reevaluated": True}
 
         result = json.loads(_tests_tools()["reevaluate_test_run"](
             test_run_id="run-1", checks=["coherence", "tone"]
@@ -116,26 +115,26 @@ class TestReevaluateTestRun:
 
         assert result["original_run_unchanged"] is True
         assert sorted(result["reevaluated_check_ids"]) == ["id-coh", "id-tone"]
-        body = mock_request.call_args[1]["json"]
-        assert sorted(body["check_ids"]) == ["id-coh", "id-tone"]
+        run_id, check_ids = okareo.re_evaluate.call_args[0]
+        assert run_id == "run-1"
+        assert sorted(check_ids) == ["id-coh", "id-tone"]
 
-    @patch("src.tools.tests.okareo_api_request")
     @patch("src.tools.tests._derive_run_check_ids")
     @patch("src.tools.tests._find_test_run")
     @patch("src.tools.tests.resolve_project_id")
     @patch("src.tools.tests.get_okareo_client")
     def test_reevaluate_defaults_to_existing_checks(
-        self, mock_client, mock_resolve, mock_find, mock_derive, mock_request,
+        self, mock_client, mock_resolve, mock_find, mock_derive,
         monkeypatch,
     ):
         monkeypatch.setenv("OKAREO_API_KEY", "k")
         okareo = MagicMock()
         okareo.get_all_checks.return_value = [_check_brief("coherence", "id-coh")]
+        okareo.re_evaluate.return_value = {"reevaluated": True}
         mock_client.return_value = okareo
         mock_resolve.return_value = "proj-1"
         mock_find.return_value = {"id": "run-1", "status": "FINISHED"}
         mock_derive.return_value = ["id-coh"]
-        mock_request.return_value = {"reevaluated": True}
 
         result = json.loads(_tests_tools()["reevaluate_test_run"](
             test_run_id="run-1"

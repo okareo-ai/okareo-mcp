@@ -2,6 +2,8 @@
 
 This template extends a base Driver persona prompt with voice-specific behaviors for simulating voice/phone interactions. Add these sections to your existing Driver prompt when testing voice AI systems.
 
+**Scope — persona quirks only.** The platform's canonical Conversation Behavior block (spoken-language patterns, information disclosure, silence check-ins) is appended to every driver automatically by `create_or_update_driver` — do not restate it. Use these sections only for traits specific to THIS persona. And note: a voice's **accent and language come from the voice selection** (`voice` on `create_or_update_driver`; discover options with `list_driver_voices` and match the `accent`/`language` metadata) — prompt text does not change how the TTS voice sounds.
+
 ## Extension Sections
 
 Add the following sections to your base Driver persona prompt:
@@ -19,7 +21,7 @@ Add the following sections to your base Driver persona prompt:
 - Emotional triggers: {triggers} (e.g., "gets upset when asked to repeat information")
 
 ## Speech Patterns
-- Accent or dialect notes: {accent_notes}
+- Dialect or vocabulary notes: {dialect_notes} (word choice only — the spoken accent comes from the selected voice, not the prompt)
 - Common phrases: {common_phrases}
 - How they handle silence: {silence_behavior} (e.g., "asks 'are you still there?' after 3 seconds")
 - How they confirm understanding: {confirmation_style} (e.g., "repeats key information back")

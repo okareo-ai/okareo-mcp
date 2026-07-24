@@ -31,6 +31,11 @@ _logger = logging.getLogger("okareo.analytics")
 # task removes itself via ``add_done_callback`` once it completes.
 _background_tasks: set = set()
 
+# (distinct_id, email) pairs already sent to PostHog `$identify` this process.
+# Identify is idempotent server-side, but re-sending it on every tool call
+# would double our event volume for nothing.
+_identified: set = set()
+
 
 def is_truthy(value: Optional[str]) -> bool:
     """Parse a string environment variable as a boolean.
@@ -131,18 +136,23 @@ def emit_tool_event(
     """Emit a tool call event to PostHog. Fire-and-forget via asyncio.create_task.
 
     Principal id selection (T030 / FR-007 / SC-005):
-        - **HTTP mode**: the calling session's ``org_id`` (read from the
-          per-request ``SessionCredential`` via the existing context helper).
-          This keeps events grouped per Okareo organization rather than per
-          server-process — which is the right granularity for a multi-tenant
-          remote endpoint. Falls back to the process uuid4 if no credential
-          is bound (e.g., the tool was called outside a request, which would
-          be a bug elsewhere but we don't want analytics to mask it).
+        - **HTTP mode, OAuth session with a user identity**: the JWT's
+          ``sub`` (Frontegg user id). On the first event for a given
+          (subject, email) pair this process also emits a PostHog
+          ``$identify`` carrying the user's email, so events show up
+          under the real person instead of a bare UUID. ``org_id`` is
+          kept as an event property for per-organization breakdowns.
+        - **HTTP mode, API-key session**: the session's ``org_id``
+          (no user identity exists on this path).
+        - Falls back to the process uuid4 if no credential is bound
+          (e.g., the tool was called outside a request, which would be
+          a bug elsewhere but we don't want analytics to mask it).
         - **stdio mode**: the per-process anonymous uuid4() on the
           AnalyticsClient (unchanged single-tenant behavior).
 
     Never logs, persists, or transmits the JWT, API key, or any derivable
-    secret — only ``org_id`` (public-by-design) is sent.
+    secret — only ``org_id``, ``sub``, and ``email`` (identity metadata,
+    not credentials) are sent.
 
     Never raises. Silently drops events on any error.
     """
@@ -156,31 +166,58 @@ def emit_tool_event(
         return
 
     distinct_id = client.distinct_id
-    # HTTP mode: prefer the per-request org_id as the analytics principal.
+    email = None
+    org_id = None
+    # HTTP mode: prefer the per-request user (or org) as the principal.
     if client.transport_type == "streamable-http":
         try:
             from src.auth.context import get_session_credential_optional
 
             cred = get_session_credential_optional()
-            if cred is not None and cred.org_id:
-                distinct_id = cred.org_id
+            if cred is not None:
+                org_id = cred.org_id or None
+                if cred.subject and cred.email:
+                    distinct_id = cred.subject
+                    email = cred.email
+                elif cred.org_id:
+                    distinct_id = cred.org_id
         except Exception:
             # Defensive — analytics MUST NEVER break tool execution.
             pass
+
+    properties = {
+        "tool_name": tool_name,
+        "transport_type": client.transport_type,
+        "server_version": client.server_version,
+        "tool_call_success": success,
+        # Person profiles only for identified users; anonymous events stay
+        # cheap and profile-less.
+        "$process_person_profile": bool(email),
+    }
+    if org_id:
+        properties["org_id"] = org_id
 
     payload = {
         "api_key": client.api_key,
         "distinct_id": distinct_id,
         "event": "okareo_mcp_tool_call",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "properties": {
-            "tool_name": tool_name,
-            "transport_type": client.transport_type,
-            "server_version": client.server_version,
-            "tool_call_success": success,
-            "$process_person_profile": False,
-        },
+        "properties": properties,
     }
+
+    identify_payload = None
+    if email and (distinct_id, email) not in _identified:
+        _identified.add((distinct_id, email))
+        set_props = {"email": email}
+        if org_id:
+            set_props["org_id"] = org_id
+        identify_payload = {
+            "api_key": client.api_key,
+            "distinct_id": distinct_id,
+            "event": "$identify",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "properties": {"$set": set_props},
+        }
 
     # Fire-and-forget needs a running event loop. In a sync context (e.g.
     # tests) there is none, so check first — otherwise the _send_event(...)
@@ -195,13 +232,37 @@ def emit_tool_event(
         return
 
     try:
-        task = asyncio.create_task(_send_event(client.http_client, payload))
+        if identify_payload is not None:
+            # Sequence $identify before the tool event so the person profile
+            # exists by the time the first identified event lands.
+            task = asyncio.create_task(
+                _send_events(client.http_client, [identify_payload, payload])
+            )
+        else:
+            task = asyncio.create_task(_send_event(client.http_client, payload))
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
     except Exception:
         _logger.exception(
             "Failed to schedule analytics send for tool=%s", tool_name
         )
+
+
+async def _send_events(
+    http_client: httpx.AsyncClient, payloads: list
+) -> None:
+    """POST several events in order. Failures never propagate."""
+    for payload in payloads:
+        await _send_event(http_client, payload)
+
+
+def _reset_for_tests() -> None:
+    """Test helper: forget which principals have been identified.
+
+    Production code MUST NOT call this — the dedupe set is process-scoped
+    by design.
+    """
+    _identified.clear()
 
 
 async def _send_event(
@@ -217,7 +278,7 @@ async def _send_event(
     event = payload.get("event", "?")
     try:
         resp = await http_client.post(
-            "https://us.i.posthog.com/capture/",
+            "https://e.okareo.com/capture/",
             json=payload,
         )
         if resp.status_code >= 300:
