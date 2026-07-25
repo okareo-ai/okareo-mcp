@@ -13,7 +13,7 @@ import pytest
 
 from src.server import mcp
 
-EXPECTED_TOOL_COUNT = 50
+EXPECTED_TOOL_COUNT = 51
 
 
 def _tools():

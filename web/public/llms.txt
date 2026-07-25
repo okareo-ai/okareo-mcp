@@ -96,3 +96,7 @@ The hosted (remote) MCP endpoint is `https://tools.okareo.com/mcp`. It speaks st
 
 - `get_docs`: Query the Okareo documentation system for conceptual or user-legible explanations.
 - `get_templates`: Retrieve prompt templates for common Okareo patterns (works offline).
+
+## Tools — REPS Baseline
+
+- `get_reps_baseline`: Serve REPS agent-evaluation baseline material (scenario banks, drivers, checks, eval configs) from the latest tagged okareo-tools GitHub Release. Omit `path` to discover files (optionally filtered by pillar: R-reasoning, E-execution, P-performance, S-security, explore, profile); provide `path` to fetch one file. Every response carries the release tag for provenance.

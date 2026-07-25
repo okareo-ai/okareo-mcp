@@ -61,6 +61,8 @@ REGISTERED_TOOLS = {
     # Documentation
     "get_docs",
     "get_templates",
+    # REPS baseline (033-serve-reps-baseline)
+    "get_reps_baseline",
     # Tenant management (FR-023..FR-029, added 2026-05-18)
     "list_tenants",
     "switch_tenant",

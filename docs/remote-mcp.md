@@ -212,6 +212,42 @@ stays fully conversational.
 
 ---
 
+## REPS baseline (`get_reps_baseline`) — operations
+
+The `get_reps_baseline` tool serves the REPS agent-evaluation baseline (the
+`reps/` tree of [okareo-ai/okareo-tools](https://github.com/okareo-ai/okareo-tools))
+directly from its **latest tagged GitHub Release**. Nothing is vendored into
+this server; only tagged, gate-validated release content is ever served — never
+the main branch.
+
+**How fresh is it?** The server caches the release in memory and re-checks
+GitHub on a TTL. A newly published okareo-tools release is picked up
+automatically — **no deploy of this server** — within the configured TTL,
+which is capped at 1 hour.
+
+**Staleness.** If GitHub is unreachable at refresh time, the server keeps
+serving the last cached release with `stale: true` and
+`stale_reason: "github_unreachable"` on every response. If an instance cold-starts
+while GitHub is down (no cache yet), the tool returns a `baseline_unavailable`
+error until GitHub is reachable.
+
+**Provenance.** Every response carries the release tag it was served from
+(e.g. `"tag": "v0.5.1"`); consuming skills record it in evaluation reports.
+
+Environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OKAREO_REPS_REFRESH_SECONDS` | `900` (15 min) | TTL between GitHub release checks. Clamped to 60–3600; **3600 (1 hour) is the documented maximum pickup delay** for a new release. |
+| `OKAREO_REPS_PINNED_TAG` | unset | **Rollback pin.** Set to a known-good tag (e.g. `v0.5.0`) to serve that release instead of the latest — a config-only change, no build. Responses show `pin: true`. Remove the variable to resume latest-release behavior. A pin naming an unretrievable tag is surfaced loudly (stale fallback with `stale_reason: "pinned_tag_unavailable"`, or `baseline_unavailable` naming the pin) — never silently substituted. |
+| `GITHUB_TOKEN` | unset | Optional. Raises the GitHub API rate limit (60/h unauthenticated → 5,000/h). Not required at the default TTL. |
+
+Rollback procedure (Cloud Run): set `OKAREO_REPS_PINNED_TAG=<tag>` on the
+service (new revision, config-only), confirm responses carry the pinned tag and
+`pin: true`; remove the variable to return to latest.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

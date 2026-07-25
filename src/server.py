@@ -54,6 +54,7 @@ from src.tools import (
     docs,
     insights,
     models,
+    reps,
     scenarios,
     simulations,
     tenants,
@@ -314,7 +315,10 @@ _INSTRUCTIONS = (
     "rotate_voice_integration_secret, delete_voice_integration, get_voice_webhook_url\n"
     "- Analytics & Dashboards: query_analytics, list_dashboards, get_dashboard, "
     "save_dashboard, reorder_dashboards, delete_dashboard\n"
-    "- Documentation: get_docs, get_templates\n\n"
+    "- Documentation: get_docs, get_templates\n"
+    "- REPS Baseline: get_reps_baseline (serves REPS agent-evaluation baseline "
+    "material — scenario banks, drivers, checks, eval configs — from the latest "
+    "okareo-tools release; reps skills use it when no local copy exists)\n\n"
     "KEY WORKFLOWS:\n"
     "1. Evaluate a model: list_scenarios and list_generation_models to discover existing "
     "resources → save_scenario to create test data → register_generation_model to register "
@@ -719,6 +723,7 @@ models.register_tools(mcp)
 simulations.register_tools(mcp)
 checks.register_tools(mcp)
 docs.register_tools(mcp)
+reps.register_tools(mcp)
 voice.register_tools(mcp)
 insights.register_tools(mcp)
 # Tenant-management tools (FR-023..FR-029). Both no-op on stdio mode because

@@ -226,6 +226,7 @@ Then use `"command": "okareo-mcp"` instead of `"command": "uvx"` with `"args": [
 |------|-------------|
 | `get_docs` | Query the Okareo documentation system for conceptual or user-legible explanations |
 | `get_templates` | Retrieve prompt templates for common Okareo patterns (works offline) |
+| `get_reps_baseline` | Serve REPS agent-evaluation baseline material (scenario banks, drivers, checks, eval configs) from the latest tagged okareo-tools release |
 
 ---
 
