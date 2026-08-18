@@ -46,6 +46,7 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import AnyHttpUrl
 
 from src.analytics import emit_tool_event, init_analytics, shutdown_analytics
+from src.analytics_context import call_scope
 from src.error_handling import format_tool_error
 from src.key_registry import scan_provider_keys
 from src.okareo_client import create_okareo_client
@@ -877,26 +878,33 @@ async def _instrumented_call_tool(name, arguments):
 
     success = True
     error_summary = ""
-    try:
-        result = await _original_call_tool(name, arguments)
-        return result
-    except Exception as e:
-        success = False
-        error_summary = type(e).__name__
-        return _error_content(format_tool_error(e, _key_registry))
-    finally:
-        duration_ms = int((time.monotonic() - started_at) * 1000)
-        outcome = "OK" if success else f"FAIL({error_summary})"
-        _tool_log(
-            f"[tool] DONE  name={name} org={org_id or '-'} "
-            f"outcome={outcome} duration_ms={duration_ms}"
-        )
-        # Analytics: fire-and-forget, never blocks tool execution
+    # Scope encloses both dispatch and emit so annotations survive until read.
+    with call_scope() as annotations:
         try:
-            if _analytics_client is not None:
-                emit_tool_event(_analytics_client, tool_name=name, success=success)
-        except Exception:
-            pass
+            result = await _original_call_tool(name, arguments)
+            return result
+        except Exception as e:
+            success = False
+            error_summary = type(e).__name__
+            return _error_content(format_tool_error(e, _key_registry))
+        finally:
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            outcome = "OK" if success else f"FAIL({error_summary})"
+            _tool_log(
+                f"[tool] DONE  name={name} org={org_id or '-'} "
+                f"outcome={outcome} duration_ms={duration_ms}"
+            )
+            # Analytics: fire-and-forget, never blocks tool execution
+            try:
+                if _analytics_client is not None:
+                    emit_tool_event(
+                        _analytics_client,
+                        tool_name=name,
+                        success=success,
+                        annotations=annotations,
+                    )
+            except Exception:
+                pass
 
 
 # Route tool dispatch through the instrumented wrapper (analytics, throttling,

@@ -305,3 +305,84 @@ class TestEmitToolEvent:
         with patch("src.analytics.asyncio.create_task", side_effect=RuntimeError("no loop")):
             # Should not raise
             emit_tool_event(client, "run_test", True)
+
+    def test_annotations_appear_in_payload(self):
+        mock_http = MagicMock()
+        client = AnalyticsClient(
+            http_client=mock_http,
+            distinct_id="test-uuid",
+            transport_type="stdio",
+            server_version="0.0.7",
+            enabled=True,
+            api_key="phk_testkey",
+        )
+        captured_payload = {}
+
+        async def capture_send(http_client, payload):
+            captured_payload.update(payload)
+
+        with patch("src.analytics._send_event", side_effect=capture_send), \
+             patch("src.analytics.asyncio.get_running_loop"), \
+             patch("src.analytics.asyncio.create_task") as mock_task:
+            def run_coro(coro):
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(coro)
+                finally:
+                    loop.close()
+                return MagicMock()
+
+            mock_task.side_effect = run_coro
+            emit_tool_event(
+                client,
+                "run_test",
+                True,
+                annotations={
+                    "project_id": "proj-1",
+                    "entity_type": "test_run",
+                    "entity_id": "run-1",
+                },
+            )
+
+        props = captured_payload["properties"]
+        assert props["project_id"] == "proj-1"
+        assert props["entity_type"] == "test_run"
+        assert props["entity_id"] == "run-1"
+
+    def test_annotations_none_matches_baseline_payload(self):
+        mock_http = MagicMock()
+        client = AnalyticsClient(
+            http_client=mock_http,
+            distinct_id="test-uuid",
+            transport_type="stdio",
+            server_version="0.0.7",
+            enabled=True,
+            api_key="phk_testkey",
+        )
+        captured = []
+
+        async def capture_send(http_client, payload):
+            captured.append(dict(payload))
+            captured[-1]["properties"] = dict(payload["properties"])
+
+        def run_coro(coro):
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(coro)
+            finally:
+                loop.close()
+            return MagicMock()
+
+        with patch("src.analytics._send_event", side_effect=capture_send), \
+             patch("src.analytics.asyncio.get_running_loop"), \
+             patch("src.analytics.asyncio.create_task") as mock_task:
+            mock_task.side_effect = run_coro
+            emit_tool_event(client, "run_test", True)
+            emit_tool_event(client, "run_test", True, annotations=None)
+            emit_tool_event(client, "run_test", True, annotations={})
+
+        assert len(captured) == 3
+        # Drop timestamp — it differs per call.
+        for p in captured:
+            del p["timestamp"]
+        assert captured[0] == captured[1] == captured[2]

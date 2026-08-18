@@ -128,3 +128,41 @@ class TestConcurrentSessionsSameUserDifferentTenantTokens:
         asyncio.run(run())
 
         assert sorted(captured_api_keys) == ["jwt-bound-to-X", "jwt-bound-to-Y"]
+
+
+class TestProjectIdIsolationAcrossOrgs:
+    """End-to-end: two differently-scoped sessions resolve their own project IDs."""
+
+    def test_two_orgs_resolve_independent_project_ids(self, monkeypatch):
+        from src.okareo_client import (
+            _reset_for_tests as _reset_project_cache,
+            resolve_project_id,
+        )
+
+        _reset_project_cache()
+        monkeypatch.delenv("OKAREO_API_KEY", raising=False)
+
+        resolved: dict[str, str] = {}
+
+        def _resolve(org_id: str, project_id: str) -> str:
+            set_session_credential(
+                SessionCredential(
+                    kind="oauth",
+                    api_key=f"jwt-{org_id}",
+                    org_id=org_id,
+                    subject="user-1",
+                )
+            )
+            okareo = MagicMock()
+            okareo.api_key = f"jwt-{org_id}"
+            project = MagicMock()
+            project.name = "Global"
+            project.id = project_id
+            okareo.get_projects.return_value = [project]
+            return resolve_project_id(okareo)
+
+        resolved["A"] = _resolve("org-A", "proj-A")
+        resolved["B"] = _resolve("org-B", "proj-B")
+        assert resolved["A"] == "proj-A"
+        assert resolved["B"] == "proj-B"
+        assert resolved["A"] != resolved["B"]

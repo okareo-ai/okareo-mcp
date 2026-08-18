@@ -135,6 +135,22 @@ class TestListTenantsHappyPath:
         currents = {t["id"]: t["is_current"] for t in payload["tenants"]}
         assert currents == {"t-1": False, "t-2": True}
 
+    def test_list_tenants_populates_org_name_cache(self):
+        from src.analytics import _org_names, _reset_for_tests
+
+        _reset_for_tests()
+        cred = _make_oauth_credential(org_id="t-1")
+        tools = _capture_tools()
+        fixture = [Tenant(id="t-1", name="Acme"), Tenant(id="t-2", name="Globex")]
+
+        async def run():
+            with _set_session_and_id(cred, "sess-A"), _patch_user_info(fixture):
+                await tools["list_tenants"]()
+
+        asyncio.run(run())
+        assert _org_names["t-1"] == "Acme"
+        assert _org_names["t-2"] == "Globex"
+
 
 class TestListTenantsErrors:
     def test_bearer_api_key_session_rejects(self):

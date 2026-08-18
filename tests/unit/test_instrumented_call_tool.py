@@ -46,3 +46,70 @@ def test_tool_exception_surfaces_real_error_not_schema_violation(monkeypatch):
     assert "outputSchema defined" not in text
     payload = json.loads(text)
     assert "error" in payload
+
+
+def test_call_scope_opened_and_annotations_reach_emit(monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from src.analytics import AnalyticsClient
+    from src.analytics_context import annotate
+
+    monkeypatch.setenv("OKAREO_API_KEY", "test-key")
+    monkeypatch.setattr(server, "_okareo_client", MagicMock())
+
+    async def _annotate_then_ok(name, arguments):
+        annotate(project_id="proj-from-tool", entity_type="scenario")
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text='{"ok": true}')],
+        )
+
+    monkeypatch.setattr(server, "_original_call_tool", _annotate_then_ok)
+    client = AnalyticsClient(
+        http_client=MagicMock(),
+        distinct_id="d",
+        transport_type="stdio",
+        server_version="0.0.test",
+        enabled=True,
+    )
+    monkeypatch.setattr(server, "_analytics_client", client)
+
+    with patch("src.server.emit_tool_event") as mock_emit:
+        result = _call("get_driver", {"name": "any"})
+        assert result.isError is False
+        mock_emit.assert_called_once()
+        kwargs = mock_emit.call_args.kwargs
+        assert kwargs["annotations"]["project_id"] == "proj-from-tool"
+        assert kwargs["annotations"]["entity_type"] == "scenario"
+        assert kwargs["success"] is True
+
+
+def test_tool_that_raises_still_emits_partial_annotations(monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from src.analytics import AnalyticsClient
+    from src.analytics_context import annotate
+
+    monkeypatch.setenv("OKAREO_API_KEY", "test-key")
+    monkeypatch.setattr(server, "_okareo_client", MagicMock())
+
+    async def _partial_then_raise(name, arguments):
+        annotate(lookup_by="name")
+        raise RuntimeError("backend exploded")
+
+    monkeypatch.setattr(server, "_original_call_tool", _partial_then_raise)
+    client = AnalyticsClient(
+        http_client=MagicMock(),
+        distinct_id="d",
+        transport_type="stdio",
+        server_version="0.0.test",
+        enabled=True,
+    )
+    monkeypatch.setattr(server, "_analytics_client", client)
+
+    with patch("src.server.emit_tool_event") as mock_emit:
+        result = _call("get_driver", {"name": "any"})
+        assert result.isError is True
+        mock_emit.assert_called_once()
+        kwargs = mock_emit.call_args.kwargs
+        assert kwargs["success"] is False
+        assert kwargs["annotations"]["lookup_by"] == "name"

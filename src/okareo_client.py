@@ -18,13 +18,34 @@ default-tenant JWT and presents it on every request; the override JWT is
 used only server-side to form downstream Okareo calls.
 """
 
+import hashlib
 import inspect
 import os
 
 from okareo import Okareo
 
-# Session-level cache for project ID, keyed by okareo instance id
-_project_id_cache: dict[int, str] = {}
+# Process-scoped cache: (scope, base_url) → project_id.
+# scope is SessionCredential.org_id in HTTP mode, or a short hash of the API
+# key in stdio — never the raw credential. Keyed on the caller, not id(okareo),
+# because HTTP mode constructs a fresh client per request and CPython can reuse
+# freed object ids across organizations (see FR-018 / research R4).
+_project_id_cache: dict[tuple[str, str], str] = {}
+_PROJECT_ID_CACHE_BOUND = 512
+
+
+def _reset_for_tests() -> None:
+    """Clear the project-id cache. Production code must not call this."""
+    _project_id_cache.clear()
+
+
+def _project_cache_scope(okareo: Okareo) -> str:
+    """Derive a stable, non-secret cache scope for the current caller."""
+    from src.auth.context import get_session_credential_optional
+
+    cred = get_session_credential_optional()
+    if cred is not None and cred.org_id:
+        return cred.org_id
+    return hashlib.sha256(okareo.api_key.encode("utf-8")).hexdigest()[:16]
 
 
 def create_okareo_client(
@@ -153,7 +174,8 @@ def _current_session_id() -> str | None:
 def resolve_project_id(okareo: Okareo) -> str:
     """Resolve the 'Global' project ID from the user's Okareo account.
 
-    Caches the result per Okareo instance for the session lifetime.
+    Caches the result per (organization|key-hash, base_url) for the process
+    lifetime — at most one ``get_projects()`` call per organization per process.
 
     Args:
         okareo: An authenticated Okareo client.
@@ -164,13 +186,16 @@ def resolve_project_id(okareo: Okareo) -> str:
     Raises:
         ValueError: If no project named 'Global' is found.
     """
-    cache_key = id(okareo)
+    base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
+    cache_key = (_project_cache_scope(okareo), base_url)
     if cache_key in _project_id_cache:
         return _project_id_cache[cache_key]
 
     projects = okareo.get_projects()
     for project in projects:
         if project.name == "Global":
+            if len(_project_id_cache) >= _PROJECT_ID_CACHE_BOUND:
+                _project_id_cache.clear()
             _project_id_cache[cache_key] = project.id
             return project.id
 

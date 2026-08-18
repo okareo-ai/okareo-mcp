@@ -16,6 +16,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from okareo_api_client.errors import UnexpectedStatus
 
+from src.analytics_context import annotate
 from src.error_handling import format_tool_error
 from src.okareo_client import (
     find_test_runs,
@@ -94,6 +95,31 @@ def _build_scenario_index_map(run_metadata: Optional[dict]) -> dict:
             if test_id is not None and idx is not None:
                 mapping[str(test_id)] = idx
     return mapping
+
+
+def _data_point_id(dp) -> str:
+    return str(_get_attr(dp, "id") or _get_attr(dp, "test_id") or "")
+
+
+def _scenario_index_map(run_metadata: Optional[dict], data_points) -> dict:
+    """Resolve test_id → scenario_index for a run's data points.
+
+    scores_by_row is a positional list that carries no test_id, so the
+    metadata map is empty for every run the API actually returns. Fall back
+    to 1-based position in the data-point list — both this tool and
+    get_conversation_transcript issue the identical find_test_data_points
+    request, so the ordering agrees.
+    """
+    mapping = _build_scenario_index_map(run_metadata)
+    if mapping:
+        return mapping
+    if not isinstance(data_points, list):
+        return {}
+    return {
+        _data_point_id(dp): i
+        for i, dp in enumerate(data_points, start=1)
+        if _data_point_id(dp)
+    }
 
 
 def _find_test_run(okareo, project_id, identifier: str):
@@ -463,10 +489,21 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
-        # Build filter payload
+        # Build filter payload.
+        #
+        # return_model_metrics=False does not blank the metrics: server-side it drops
+        # only ROW_METRICS_KEYS (scores_by_row / scores_by_label / row_level_metrics)
+        # and keeps mean_scores, percentile_scores, aggregate_* and check_ids. Those
+        # row-level entries carry a written explanation per check per row, which is
+        # essentially the entire response body -- measured at 2.82 MiB vs 0.40 MiB
+        # over 410 runs. find_test_runs has no limit parameter, so the caller cannot
+        # bound the row count either, and a large enough project exceeds Cloud Run's
+        # response cap and fails the whole request with a bare HTTP 500.
+        #
+        # A list view shows aggregates. Per-row scores come from get_test_run_results.
         payload_kwargs: dict = {
             "project_id": project_id,
-            "return_model_metrics": True,
+            "return_model_metrics": False,
         }
 
         if simulation_only:
@@ -620,11 +657,19 @@ def register_tools(mcp: FastMCP) -> None:
                 "error": "Provide either test_run_id or name to look up a test run.",
             })
 
+        lookup_by = "id" if test_run_id else "name"
+
         try:
             okareo = get_okareo_client()
             project_id = resolve_project_id(okareo)
         except Exception as e:
             return format_tool_error(e)
+
+        annotate(
+            project_id=project_id,
+            lookup_by=lookup_by,
+            include_transcripts=include_transcripts,
+        )
 
         resolved_id = test_run_id
         run_metadata = None
@@ -747,6 +792,12 @@ def register_tools(mcp: FastMCP) -> None:
             except Exception as e:
                 return format_tool_error(e)
 
+        if resolved_id:
+            annotate(
+                entity_type="test_run",
+                entity_id=str(resolved_id),
+            )
+
         # Fetch per-row data points
         try:
             data_points = okareo.find_test_data_points(
@@ -759,15 +810,13 @@ def register_tools(mcp: FastMCP) -> None:
             return format_tool_error(e)
 
         # Build scenario_index lookup from run metadata
-        index_map = _build_scenario_index_map(run_metadata)
+        index_map = _scenario_index_map(run_metadata, data_points)
 
         dp_list = []
         if isinstance(data_points, list):
             for dp in data_points:
                 # Resolve scenario_index via test_id
-                dp_id = str(
-                    _get_attr(dp, "id") or _get_attr(dp, "test_id") or ""
-                )
+                dp_id = _data_point_id(dp)
                 scenario_idx = index_map.get(dp_id)
 
                 metric = _serialize_value(_get_attr(dp, "metric_value"))
@@ -813,6 +862,8 @@ def register_tools(mcp: FastMCP) -> None:
         else:
             paginated = dp_list[offset:] if offset > 0 else dp_list
             has_more = False
+
+        annotate(result_count=total_count)
 
         response = {
             "test_run": run_metadata,
@@ -867,19 +918,29 @@ def register_tools(mcp: FastMCP) -> None:
                 "identify the conversation.",
             })
 
+        lookup_by = "id" if test_id else "index"
+
         try:
             okareo = get_okareo_client()
         except Exception as e:
             return format_tool_error(e)
 
+        annotate(
+            entity_type="test_run",
+            entity_id=str(test_run_id),
+            lookup_by=lookup_by,
+        )
+
         # Fetch run metadata for the name and scenario_index mapping
         run_name = ""
         run_metadata = None
+        project_id = None
         try:
             from okareo_api_client.models.general_find_payload import (
                 GeneralFindPayload,
             )
             project_id = resolve_project_id(okareo)
+            annotate(project_id=project_id)
             payload = GeneralFindPayload(
                 id=test_run_id,
                 project_id=project_id,
@@ -906,11 +967,6 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception:
             pass  # Non-critical — we can still return the transcript
 
-        # Build scenario_index lookup
-        index_map = _build_scenario_index_map(run_metadata)
-        # Also build reverse map: scenario_index → test_id
-        reverse_map = {v: k for k, v in index_map.items()}
-
         # Fetch all data points
         try:
             data_points = okareo.find_test_data_points(
@@ -927,6 +983,10 @@ def register_tools(mcp: FastMCP) -> None:
                 "error": f"No data points found for test run '{test_run_id}'.",
             })
 
+        # Build scenario_index lookup (same ordering as get_test_run_results)
+        index_map = _scenario_index_map(run_metadata, data_points)
+        reverse_map = {v: k for k, v in index_map.items()}
+
         # Resolve scenario_index to test_id for matching
         target_test_id = test_id
         if scenario_index is not None and not target_test_id:
@@ -935,33 +995,30 @@ def register_tools(mcp: FastMCP) -> None:
         # Find the matching data point
         match = None
         for dp in data_points:
-            dp_id = str(
-                _get_attr(dp, "id") or _get_attr(dp, "test_id") or ""
-            )
-            if target_test_id and dp_id == str(target_test_id):
+            if target_test_id and _data_point_id(dp) == str(target_test_id):
                 match = dp
                 break
 
         if match is None:
             if scenario_index is not None:
                 all_indices = sorted(index_map.values())
-                if all_indices:
-                    range_str = f"{min(all_indices)}-{max(all_indices)}"
-                else:
-                    range_str = "none found"
+                valid = (
+                    f"valid indices {min(all_indices)}-{max(all_indices)}"
+                    if all_indices
+                    else "no indexable conversations"
+                )
                 return json.dumps({
                     "error": f"Scenario index {scenario_index} is out of "
                     f"range. This test run has {len(data_points)} "
-                    f"conversations (indices {range_str}).",
+                    f"conversation(s) ({valid}).",
                 })
             return json.dumps({
                 "error": f"No data point with test_id '{test_id}' found "
                 f"in test run '{test_run_id}'.",
             })
 
-        match_id = str(
-            _get_attr(match, "id") or _get_attr(match, "test_id") or ""
-        )
+        match_id = _data_point_id(match)
+        annotate(data_point_id=match_id)
         return json.dumps({
             "test_run_id": test_run_id,
             "test_run_name": run_name,

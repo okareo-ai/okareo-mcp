@@ -703,3 +703,92 @@ class TestSaveScenarioStdioRegression:
 
         assert result["row_count"] == 1
         mock_client.create_scenario_set.assert_called_once()
+
+
+class TestAnalyticsAnnotations:
+    """034: entity / project / usage attributes for save_scenario."""
+
+    @patch(_PATCH_UPLOAD_BYTES)
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_save_scenario_annotates_create(
+        self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
+    ):
+        from src.analytics_context import call_scope
+
+        mock_get_client.return_value = MagicMock()
+        mock_get_scenarios.sync.return_value = []
+        mock_upload.return_value = _make_mock_scenario_response(
+            scenario_id="sc-new", scenario_count=2,
+        )
+
+        with call_scope() as annotations:
+            result = json.loads(tools["save_scenario"](
+                name="from-content", content=_jsonl(2),
+            ))
+
+        assert result["created"] is True
+        assert annotations["entity_type"] == "scenario"
+        assert annotations["entity_id"] == "sc-new"
+        assert annotations["project_id"] == "proj-uuid-456"
+        assert annotations["row_count"] == 2
+        assert annotations["input_source"] == "content"
+
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_save_scenario_idempotent_annotates_existing_id(
+        self, mock_resolve, mock_get_client, tools, mock_get_scenarios
+    ):
+        from src.analytics_context import call_scope
+
+        mock_get_client.return_value = MagicMock()
+        existing = _make_mock_scenario_response(
+            scenario_id="sc-existing", name="dupe", scenario_count=7,
+        )
+        mock_get_scenarios.sync.return_value = [existing]
+
+        with call_scope() as annotations:
+            result = json.loads(tools["save_scenario"](
+                name="dupe", content=_jsonl(3),
+            ))
+
+        assert result["created"] is False
+        assert annotations["entity_id"] == "sc-existing"
+        assert annotations["row_count"] == 7
+        assert annotations["input_source"] == "content"
+
+    @patch(_PATCH_GET_CLIENT)
+    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    def test_save_scenario_rows_input_source(
+        self, mock_resolve, mock_get_client, tools, mock_get_scenarios
+    ):
+        from src.analytics_context import call_scope
+
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_get_scenarios.sync.return_value = []
+        mock_client.create_scenario_set.return_value = _make_mock_scenario_response(
+            scenario_id="sc-rows", scenario_count=0,
+        )
+
+        with call_scope() as annotations:
+            tools["save_scenario"](
+                name="rows", rows=[{"input": "q", "result": "a"}],
+            )
+
+        assert annotations["input_source"] == "rows"
+        assert annotations["row_count"] == 1
+
+    @patch(_PATCH_GET_CLIENT)
+    def test_save_scenario_project_fail_still_returns(
+        self, mock_get_client, tools
+    ):
+        from src.analytics_context import call_scope
+
+        mock_get_client.side_effect = ValueError("no key")
+        with call_scope() as annotations:
+            out = json.loads(tools["save_scenario"](
+                name="x", rows=[{"input": "q", "result": "a"}],
+            ))
+        assert "error" in out
+        assert "entity_id" not in annotations

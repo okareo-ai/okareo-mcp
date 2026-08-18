@@ -20,6 +20,7 @@ from okareo_api_client.errors import UnexpectedStatus
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from src.analytics_context import annotate
 from src.error_handling import format_tool_error
 from src.okareo_client import find_test_runs, get_okareo_client, resolve_project_id
 
@@ -156,6 +157,8 @@ def _save_scenario_impl(
             "error": f"Provide only one of {valid} (got: {', '.join(sources)}).",
         })
 
+    input_source = sources[0]
+
     # FR-007/FR-010: file_path cannot work on the hosted server.
     if file_path and is_http_mode():
         return json.dumps({
@@ -205,10 +208,19 @@ def _save_scenario_impl(
             for s in scenarios:
                 if _get_attr(s, "name") == name:
                     row_count = _get_attr(s, "scenario_count", 0)
+                    scenario_id = str(_get_attr(s, "scenario_id", ""))
+                    existing_project_id = str(_get_attr(s, "project_id", ""))
+                    annotate(
+                        project_id=existing_project_id or project_id,
+                        entity_type="scenario",
+                        entity_id=scenario_id,
+                        row_count=row_count,
+                        input_source=input_source,
+                    )
                     return json.dumps({
                         "name": name,
-                        "id": str(_get_attr(s, "scenario_id", "")),
-                        "project_id": str(_get_attr(s, "project_id", "")),
+                        "id": scenario_id,
+                        "project_id": existing_project_id,
                         "tags": _get_attr(s, "tags", []) or [],
                         "row_count": row_count,
                         "created_date": str(_get_attr(s, "time_created", "")),
@@ -280,10 +292,19 @@ def _save_scenario_impl(
         except Exception:
             pass  # Tags update is best-effort; don't fail the create
 
+    scenario_id = str(_get_attr(result, "scenario_id", ""))
+    result_project_id = str(_get_attr(result, "project_id", project_id))
+    annotate(
+        project_id=result_project_id,
+        entity_type="scenario",
+        entity_id=scenario_id,
+        row_count=row_count,
+        input_source=input_source,
+    )
     return json.dumps({
         "name": _get_attr(result, "name", name),
-        "id": str(_get_attr(result, "scenario_id", "")),
-        "project_id": str(_get_attr(result, "project_id", project_id)),
+        "id": scenario_id,
+        "project_id": result_project_id,
         "tags": result_tags,
         "row_count": row_count,
         "created_date": str(_get_attr(result, "time_created", "")),

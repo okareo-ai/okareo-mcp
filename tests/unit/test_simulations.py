@@ -1156,3 +1156,380 @@ class TestVoiceDrivers:
         assert result["voice_count"] == 2
         assert result["voice_profile_count"] == 2
         assert sorted(result["languages"]) == ["en-US", "es-ES"]
+
+
+class TestAnalyticsAnnotations:
+    """034: entity / project / usage attributes for driver + simulation."""
+
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.okareo_api_request")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_create_or_update_driver_annotations(
+        self, mock_client, mock_request, mock_resolve, tools
+    ):
+        from src.analytics_context import call_scope
+
+        mock_client.return_value = MagicMock()
+        mock_request.return_value = {
+            "id": "drv-99", "name": "plain", "language": "en",
+        }
+
+        with call_scope() as annotations:
+            result = json.loads(tools["create_or_update_driver"](
+                name="plain",
+                prompt_template="You are a caller. {scenario_input}",
+                language="en",
+            ))
+
+        assert result["created"] is True
+        assert annotations["entity_type"] == "driver"
+        assert annotations["entity_id"] == "drv-99"
+        assert annotations["project_id"] == "proj-1"
+        assert annotations["is_voice"] is False
+        assert annotations["language"] == "en"
+        mock_resolve.assert_called_once()
+
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.okareo_api_request")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_create_or_update_driver_is_voice(
+        self, mock_client, mock_request, mock_resolve, tools
+    ):
+        from src.analytics_context import call_scope
+
+        mock_client.return_value = MagicMock()
+        mock_request.side_effect = [
+            [{"id": "nova", "language": "en"}],
+            [{"profile_name": "calm"}],
+            {"id": "drv-v", "name": "voice", "voice": "nova", "language": "en"},
+        ]
+
+        with call_scope() as annotations:
+            tools["create_or_update_driver"](
+                name="voice",
+                prompt_template="You are a caller. {scenario_input}",
+                voice="nova",
+                language="en",
+            )
+
+        assert annotations["is_voice"] is True
+
+    @patch("src.tools.simulations._buffered_submit")
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_run_simulation_annotations_finished(
+        self, mock_client, mock_resolve, mock_buffered, tools
+    ):
+        from okareo_api_client.api import default as _default_pkg
+
+        from src.analytics_context import call_scope
+
+        okareo = MagicMock()
+        mock_client.return_value = okareo
+        scenario = MagicMock()
+        scenario.name = "my-scenario"
+        scenario.scenario_count = 5
+        scenario.scenario_id = "sc-1"
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [scenario]
+        mock_buffered.return_value = (
+            "finished", MagicMock(), "run-xyz", "https://app.okareo.com/r",
+        )
+
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ), call_scope() as annotations:
+            out = json.loads(tools["run_simulation"](
+                name="sim-1",
+                scenario_name="my-scenario",
+                target_name="tgt",
+                repeats=2,
+                max_turns=7,
+            ))
+
+        assert "error" not in out, out
+        assert annotations["entity_type"] == "test_run"
+        assert annotations["entity_id"] == "run-xyz"
+        assert annotations["run_status"] == "finished"
+        assert annotations["repeats"] == 2
+        assert annotations["max_turns"] == 7
+        assert annotations["is_rerun"] is False
+        assert annotations["project_id"] == "proj-1"
+
+    @patch("src.tools.simulations._buffered_submit")
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_run_simulation_running_and_rerun(
+        self, mock_client, mock_resolve, mock_buffered, tools
+    ):
+        from okareo_api_client.api import default as _default_pkg
+
+        from src.analytics_context import call_scope
+
+        okareo = MagicMock()
+        mock_client.return_value = okareo
+        scenario = MagicMock()
+        scenario.name = "my-scenario"
+        scenario.scenario_count = 5
+        scenario.scenario_id = "sc-1"
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [scenario]
+        mock_buffered.return_value = (
+            "running", None, "run-live", "https://app.okareo.com/r",
+        )
+
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ), patch(
+            "src.tools.simulations.find_test_runs",
+            return_value=[{
+                "id": "old-run",
+                "name": "old",
+                "scenario_set_id": "sc-1",
+                "mut_id": "m1",
+            }],
+        ), call_scope() as annotations:
+            out = json.loads(tools["run_simulation"](
+                name="sim-rerun",
+                scenario_name="my-scenario",
+                target_name="tgt",
+                based_on_run_id="old-run",
+            ))
+
+        assert "error" not in out, out
+        assert annotations["run_status"] == "running"
+        assert annotations["is_rerun"] is True
+        assert annotations["entity_id"] == "run-live"
+
+    @patch("src.tools.simulations._buffered_submit")
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_run_simulation_failed_status(
+        self, mock_client, mock_resolve, mock_buffered, tools
+    ):
+        from okareo_api_client.api import default as _default_pkg
+
+        from src.analytics_context import call_scope
+
+        okareo = MagicMock()
+        mock_client.return_value = okareo
+        scenario = MagicMock()
+        scenario.name = "my-scenario"
+        scenario.scenario_count = 5
+        scenario.scenario_id = "sc-1"
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [scenario]
+        mock_buffered.return_value = (
+            "failed", RuntimeError("boom"), None, None,
+        )
+
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ), call_scope() as annotations:
+            out = json.loads(tools["run_simulation"](
+                name="sim-fail",
+                scenario_name="my-scenario",
+                target_name="tgt",
+            ))
+
+        assert "error" in out
+        assert annotations["run_status"] == "failed"
+        assert annotations["project_id"] == "proj-1"
+
+
+class TestRunSimulationResolutionErrors:
+    """Missing/unresolvable scenario and target must be recoverable in one retry."""
+
+    @staticmethod
+    def _scenario(name, scenario_id, rows=5):
+        s = MagicMock()
+        s.name = name
+        s.scenario_id = scenario_id
+        s.scenario_count = rows
+        return s
+
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_missing_scenario_name_lists_candidates(
+        self, mock_client, mock_resolve, tools
+    ):
+        from okareo_api_client.api import default as _default_pkg
+
+        mock_client.return_value = MagicMock()
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [
+            self._scenario("billing-cases", "sc-1", rows=12),
+            self._scenario("returns-cases", "sc-2", rows=3),
+        ]
+
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ):
+            out = json.loads(tools["run_simulation"](name="sim", target_name="tgt"))
+
+        assert "scenario_name is required" in out["error"]
+        assert out["available_scenarios"] == [
+            {"name": "billing-cases", "rows": 12},
+            {"name": "returns-cases", "rows": 3},
+        ]
+
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_unknown_scenario_name_suggests_near_match(
+        self, mock_client, mock_resolve, tools
+    ):
+        from okareo_api_client.api import default as _default_pkg
+
+        mock_client.return_value = MagicMock()
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [self._scenario("billing-cases", "sc-1")]
+
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ):
+            out = json.loads(tools["run_simulation"](
+                name="sim", scenario_name="billing_cases", target_name="tgt",
+            ))
+
+        assert "not found" in out["error"]
+        assert out["did_you_mean"] == ["billing-cases"]
+        assert out["available_scenarios"] == [{"name": "billing-cases", "rows": 5}]
+
+    @patch("src.tools.simulations._fetch_targets")
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_missing_target_name_lists_candidates(
+        self, mock_client, mock_resolve, mock_targets, tools
+    ):
+        from okareo_api_client.api import default as _default_pkg
+
+        mock_client.return_value = MagicMock()
+        mock_targets.return_value = [
+            {"id": "m1", "name": "support-bot", "type": "voice"},
+        ]
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [self._scenario("billing-cases", "sc-1")]
+
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ):
+            out = json.loads(tools["run_simulation"](
+                name="sim", scenario_name="billing-cases",
+            ))
+
+        assert "target_name is required" in out["error"]
+        assert out["available_targets"] == [
+            {"name": "support-bot", "type": "voice"},
+        ]
+
+    @patch("src.tools.simulations._fetch_drivers")
+    @patch("src.tools.simulations._fetch_targets")
+    @patch("src.tools.simulations._buffered_submit")
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_rerun_resolves_target_and_driver_by_id(
+        self, mock_client, mock_resolve, mock_buffered, mock_targets,
+        mock_drivers, tools,
+    ):
+        """mut_id/driver_id from the original run map to names, not to the run name."""
+        from okareo_api_client.api import default as _default_pkg
+
+        okareo = MagicMock()
+        mock_client.return_value = okareo
+        mock_targets.return_value = [
+            {"id": "m1", "name": "support-bot", "type": "voice"},
+        ]
+        mock_drivers.return_value = [{"id": "d1", "name": "angry-caller"}]
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [self._scenario("billing-cases", "sc-1")]
+        mock_buffered.return_value = (
+            "running", None, "run-live", "https://app.okareo.com/r",
+        )
+
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ), patch(
+            "src.tools.simulations.find_test_runs",
+            return_value=[{
+                "id": "old-run",
+                "name": "a run name that is not a target name",
+                "scenario_set_id": "sc-1",
+                "mut_id": "m1",
+                "driver_id": "d1",
+            }],
+        ):
+            out = json.loads(tools["run_simulation"](
+                name="sim-rerun", based_on_run_id="old-run",
+            ))
+
+        assert "error" not in out, out
+        assert out["target"] == "support-bot"
+        assert out["driver"] == "angry-caller"
+
+    @patch("src.tools.simulations._fetch_targets", return_value=[])
+    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_rerun_with_deleted_scenario_explains_why(
+        self, mock_client, mock_resolve, mock_targets, tools
+    ):
+        from okareo_api_client.api import default as _default_pkg
+
+        mock_client.return_value = MagicMock()
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [self._scenario("billing-cases", "sc-1")]
+
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ), patch(
+            "src.tools.simulations.find_test_runs",
+            return_value=[{
+                "id": "old-run",
+                "name": "old",
+                "scenario_set_id": "sc-deleted",
+                "mut_id": "m1",
+            }],
+        ):
+            out = json.loads(tools["run_simulation"](
+                name="sim-rerun", based_on_run_id="old-run",
+            ))
+
+        assert "scenario_name is required" in out["error"]
+        assert out["based_on_run_id"] == "old-run"
+        assert any("no longer exists" in n for n in out["rerun_notes"])
+        assert out["available_scenarios"] == [{"name": "billing-cases", "rows": 5}]
+
+
+class TestListSimulationsMetricsRequest:
+    """Summary mode documents itself as returning results without model_metrics and
+    discards them when formatting, so it must not ask the API for them. Detailed
+    mode renders them and must. See TestListToolsSkipRowLevelMetrics in test_tests.py.
+    """
+
+    def _run(self, detail_level):
+        from unittest.mock import MagicMock, patch
+
+        tools = _register_and_get_tools()
+        find = MagicMock(return_value=[])
+
+        with patch("src.tools.simulations.get_okareo_client", return_value=MagicMock()), \
+             patch("src.tools.simulations.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.simulations.find_test_runs", find):
+            tools["list_simulations"](detail_level=detail_level)
+
+        return find.call_args[0][1]
+
+    def test_summary_does_not_request_metrics(self):
+        assert self._run("summary").return_model_metrics is False
+
+    def test_detailed_does_not_request_metrics_either(self):
+        # detailed mode's cap to 5 is a client-side slice applied after the whole
+        # response has arrived, so it bounds the output but not the request.
+        assert self._run("detailed").return_model_metrics is False

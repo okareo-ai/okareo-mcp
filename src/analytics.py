@@ -5,8 +5,15 @@ invocation. Uses httpx (already a project dependency) -- no posthog-python
 library. Analytics never block tool execution (fire-and-forget via
 asyncio.create_task) and failures are silently suppressed.
 
-Privacy: Only an explicit allow-list of properties is sent. Tool arguments,
-responses, API keys, and error messages are never transmitted.
+Organization attribution: every hosted-session event carries ``org_id`` and a
+``$groups`` association. Display names are resolved fire-and-forget from
+Frontegg on first sight of an unknown org, cached per process, and published
+once as ``$groupidentify``. Flat ``org_id``/``org_name`` properties satisfy
+attribution without depending on PostHog's paid Group Analytics add-on.
+
+Call context: tools contribute via ``src.analytics_context.annotate()``; the
+wrapper passes the resulting dict as ``annotations`` to ``emit_tool_event``.
+Privacy is enforced at that boundary — only allow-listed scalar keys enter.
 """
 
 import asyncio
@@ -35,6 +42,27 @@ _background_tasks: set = set()
 # Identify is idempotent server-side, but re-sending it on every tool call
 # would double our event volume for nothing.
 _identified: set = set()
+
+# org_id → display name, or None = lookup attempted and failed (negative sentinel).
+_org_names: dict[str, str | None] = {}
+# org_ids with a background name resolution currently in flight.
+_org_name_inflight: set[str] = set()
+# org_ids for which `$groupidentify` has already been sent this process.
+_groupidentified: set[str] = set()
+
+_ORG_NAME_CACHE_BOUND = 512
+
+# Annotation keys that must never overwrite wrapper-owned properties.
+_RESERVED_PROPERTIES = frozenset({
+    "tool_name",
+    "transport_type",
+    "server_version",
+    "tool_call_success",
+    "org_id",
+    "org_name",
+    "$groups",
+    "$process_person_profile",
+})
 
 
 def is_truthy(value: Optional[str]) -> bool:
@@ -130,8 +158,77 @@ async def shutdown_analytics(client: Optional[AnalyticsClient]) -> None:
         print(f"Analytics shutdown error: {e}", file=sys.stderr)
 
 
+def remember_org_names(tenants) -> None:
+    """Populate the org-name cache from an already-fetched tenant list.
+
+    Called by ``list_tenants`` so a user who lists tenants names their
+    organization at zero extra Frontegg cost. Never raises.
+    """
+    try:
+        for tenant in tenants:
+            org_id = getattr(tenant, "id", None)
+            name = getattr(tenant, "name", None)
+            if org_id and name:
+                _store_org_name(str(org_id), str(name))
+    except Exception:
+        pass
+
+
+def _store_org_name(org_id: str, name: str | None) -> None:
+    if len(_org_names) >= _ORG_NAME_CACHE_BOUND:
+        _org_names.clear()
+        _org_name_inflight.clear()
+    _org_names[org_id] = name
+
+
+def _schedule_org_name_resolution(org_id: str, jwt: str) -> None:
+    """Fire-and-forget Frontegg lookup for an unknown organization name."""
+    if org_id in _org_names or org_id in _org_name_inflight:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    _org_name_inflight.add(org_id)
+
+    async def _resolve() -> None:
+        try:
+            # Function-local import keeps stdio airgapped-clean.
+            from src.auth.frontegg_user_info import get_user_tenants
+
+            tenants = await get_user_tenants(
+                jwt=jwt,
+                session_id=f"analytics-org:{org_id}",
+                frontegg_domain=os.environ.get("FRONTEGG_DOMAIN", "").strip(),
+            )
+            matched = None
+            for tenant in tenants:
+                if tenant.id == org_id:
+                    matched = tenant.name
+                    break
+            _store_org_name(org_id, matched)
+        except Exception:
+            _logger.debug(
+                "Org name resolution failed for org_id=%s", org_id, exc_info=True
+            )
+            _store_org_name(org_id, None)
+        finally:
+            _org_name_inflight.discard(org_id)
+
+    try:
+        task = asyncio.create_task(_resolve())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+    except Exception:
+        _org_name_inflight.discard(org_id)
+
+
 def emit_tool_event(
-    client: AnalyticsClient, tool_name: str, success: bool
+    client: AnalyticsClient,
+    tool_name: str,
+    success: bool,
+    annotations: dict | None = None,
 ) -> None:
     """Emit a tool call event to PostHog. Fire-and-forget via asyncio.create_task.
 
@@ -168,6 +265,7 @@ def emit_tool_event(
     distinct_id = client.distinct_id
     email = None
     org_id = None
+    cred = None
     # HTTP mode: prefer the per-request user (or org) as the principal.
     if client.transport_type == "streamable-http":
         try:
@@ -196,6 +294,26 @@ def emit_tool_event(
     }
     if org_id:
         properties["org_id"] = org_id
+        properties["$groups"] = {"organization": org_id}
+        org_name = _org_names.get(org_id)
+        if org_name:
+            properties["org_name"] = org_name
+        elif (
+            org_id not in _org_names
+            and client.transport_type == "streamable-http"
+            and cred is not None
+            and cred.kind == "oauth"
+            and cred.api_key
+        ):
+            _schedule_org_name_resolution(org_id, cred.api_key)
+
+    if annotations:
+        for key, value in annotations.items():
+            if key in _RESERVED_PROPERTIES:
+                continue
+            if value is None:
+                continue
+            properties[key] = value
 
     payload = {
         "api_key": client.api_key,
@@ -205,19 +323,42 @@ def emit_tool_event(
         "properties": properties,
     }
 
-    identify_payload = None
+    payloads: list = []
+
+    org_name_for_group = properties.get("org_name")
+    if (
+        org_id
+        and org_name_for_group
+        and org_id not in _groupidentified
+    ):
+        _groupidentified.add(org_id)
+        payloads.append({
+            "api_key": client.api_key,
+            "distinct_id": distinct_id,
+            "event": "$groupidentify",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "properties": {
+                "$group_type": "organization",
+                "$group_key": org_id,
+                "$group_set": {"name": org_name_for_group},
+                "$process_person_profile": False,
+            },
+        })
+
     if email and (distinct_id, email) not in _identified:
         _identified.add((distinct_id, email))
         set_props = {"email": email}
         if org_id:
             set_props["org_id"] = org_id
-        identify_payload = {
+        payloads.append({
             "api_key": client.api_key,
             "distinct_id": distinct_id,
             "event": "$identify",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "properties": {"$set": set_props},
-        }
+        })
+
+    payloads.append(payload)
 
     # Fire-and-forget needs a running event loop. In a sync context (e.g.
     # tests) there is none, so check first — otherwise the _send_event(...)
@@ -232,14 +373,14 @@ def emit_tool_event(
         return
 
     try:
-        if identify_payload is not None:
-            # Sequence $identify before the tool event so the person profile
-            # exists by the time the first identified event lands.
-            task = asyncio.create_task(
-                _send_events(client.http_client, [identify_payload, payload])
-            )
+        if len(payloads) == 1:
+            task = asyncio.create_task(_send_event(client.http_client, payloads[0]))
         else:
-            task = asyncio.create_task(_send_event(client.http_client, payload))
+            # Sequence $groupidentify / $identify before the tool event so
+            # group and person records exist by the time the first event lands.
+            task = asyncio.create_task(
+                _send_events(client.http_client, payloads)
+            )
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
     except Exception:
@@ -263,6 +404,9 @@ def _reset_for_tests() -> None:
     by design.
     """
     _identified.clear()
+    _org_names.clear()
+    _org_name_inflight.clear()
+    _groupidentified.clear()
 
 
 async def _send_event(

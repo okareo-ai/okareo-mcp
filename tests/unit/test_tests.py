@@ -255,3 +255,251 @@ class TestRunTestToolHandoff:
             ))
 
         assert "error" in out
+
+
+# ---------------------------------------------------------------------------
+# 034: analytics annotations for get_test_run_results / transcript
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyticsAnnotations:
+    def test_get_test_run_results_by_id(self):
+        from src.analytics_context import call_scope
+
+        tools = _tests_tools()
+        mock_okareo = MagicMock()
+        mock_okareo.find_test_data_points.return_value = [
+            SimpleNamespace(
+                id="dp-1", test_id="dp-1", metric_value={"score": 1},
+                scenario_input="a", scenario_result="b",
+            ),
+            SimpleNamespace(
+                id="dp-2", test_id="dp-2", metric_value={"score": 0},
+                scenario_input="c", scenario_result="d",
+            ),
+        ]
+
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.find_test_runs", return_value=[{
+                 "id": "run-abc",
+                 "name": "my-run",
+                 "model_metrics": {},
+             }]), \
+             call_scope() as annotations:
+            out = json.loads(tools["get_test_run_results"](
+                test_run_id="run-abc", include_transcripts=True,
+            ))
+
+        assert "error" not in out
+        assert annotations["entity_type"] == "test_run"
+        assert annotations["entity_id"] == "run-abc"
+        assert annotations["lookup_by"] == "id"
+        assert annotations["include_transcripts"] is True
+        assert annotations["result_count"] == 2
+        assert annotations["project_id"] == "proj-1"
+
+    def test_get_test_run_results_by_name_records_resolved_id(self):
+        from src.analytics_context import call_scope
+
+        tools = _tests_tools()
+        mock_okareo = MagicMock()
+        mock_okareo.find_test_data_points.return_value = []
+
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch(
+                 "src.tools.tests.find_test_runs",
+                 return_value=[{
+                     "id": "resolved-uuid",
+                     "name": "Nightly",
+                     "start_time": "2026-01-02",
+                     "model_metrics": {},
+                 }],
+             ), \
+             call_scope() as annotations:
+            out = json.loads(tools["get_test_run_results"](name="Nightly"))
+
+        assert "error" not in out
+        assert annotations["lookup_by"] == "name"
+        assert annotations["entity_id"] == "resolved-uuid"
+        assert "Nightly" not in annotations.values()
+
+    def test_get_test_run_results_name_miss_has_no_entity_id(self):
+        from src.analytics_context import call_scope
+
+        tools = _tests_tools()
+        mock_okareo = MagicMock()
+
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.find_test_runs", return_value=[]), \
+             call_scope() as annotations:
+            out = json.loads(tools["get_test_run_results"](name="missing"))
+
+        assert "error" in out
+        assert annotations["lookup_by"] == "name"
+        assert annotations["project_id"] == "proj-1"
+        assert "entity_id" not in annotations
+
+    def test_get_test_run_results_project_resolve_fail_still_emits(self):
+        from src.analytics_context import call_scope
+
+        tools = _tests_tools()
+
+        with patch(
+            "src.tools.tests.get_okareo_client",
+            side_effect=ValueError("no key"),
+        ), call_scope() as annotations:
+            out = json.loads(tools["get_test_run_results"](test_run_id="x"))
+
+        assert "error" in out
+        assert "project_id" not in annotations
+
+    def test_get_conversation_transcript_annotations(self):
+        from src.analytics_context import call_scope
+
+        tools = _tests_tools()
+        mock_okareo = MagicMock()
+        mock_okareo.find_test_data_points.return_value = [
+            SimpleNamespace(
+                id="dp-99", test_id="dp-99",
+                scenario_input="in", scenario_result="out",
+                model_input=[], model_result={}, metric_value={},
+            ),
+        ]
+
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.find_test_runs", return_value=[{
+                 "id": "run-1", "name": "r", "model_metrics": {},
+             }]), \
+             call_scope() as annotations:
+            out = json.loads(tools["get_conversation_transcript"](
+                test_run_id="run-1", test_id="dp-99",
+            ))
+
+        assert "error" not in out
+        assert annotations["entity_type"] == "test_run"
+        assert annotations["entity_id"] == "run-1"
+        assert annotations["lookup_by"] == "id"
+        assert annotations["data_point_id"] == "dp-99"
+        assert annotations["project_id"] == "proj-1"
+
+    def test_get_conversation_transcript_lookup_by_index(self):
+        from src.analytics_context import call_scope
+
+        tools = _tests_tools()
+        mock_okareo = MagicMock()
+        mock_okareo.find_test_data_points.return_value = [
+            SimpleNamespace(
+                id="dp-1", test_id="dp-1",
+                scenario_input="in", scenario_result="out",
+                model_input=[], model_result={}, metric_value={},
+            ),
+        ]
+
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.find_test_runs", return_value=[{
+                 "id": "run-1",
+                 "name": "r",
+                 "model_metrics": {
+                     "scores_by_row": [
+                         {"test_id": "dp-1", "scenario_index": 1},
+                     ],
+                 },
+             }]), \
+             call_scope() as annotations:
+            out = json.loads(tools["get_conversation_transcript"](
+                test_run_id="run-1", scenario_index=1,
+            ))
+
+        assert annotations["lookup_by"] == "index"
+        assert annotations["entity_id"] == "run-1"
+        assert "error" not in out
+
+    @staticmethod
+    def _multiturn_run_and_points():
+        """scores_by_row as the API really returns it: positional, no test_id."""
+        mock_okareo = MagicMock()
+        mock_okareo.find_test_data_points.return_value = [
+            SimpleNamespace(
+                id=f"dp-{n}", test_id=f"dp-{n}",
+                scenario_input="in", scenario_result="out",
+                model_input=[], model_result={}, metric_value={},
+            )
+            for n in ("a", "b", "c")
+        ]
+        run = [{
+            "id": "run-1", "name": "r",
+            "model_metrics": {
+                "scores_by_row": [
+                    {"response_loop": False},
+                    {"response_loop": True},
+                    {"response_loop": False},
+                ],
+            },
+        }]
+        return mock_okareo, run
+
+    def test_get_conversation_transcript_index_without_test_id_in_scores(self):
+        mock_okareo, run = self._multiturn_run_and_points()
+
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.find_test_runs", return_value=run):
+            tools = _tests_tools()
+            out = json.loads(tools["get_conversation_transcript"](
+                test_run_id="run-1", scenario_index=2,
+            ))
+
+        assert "error" not in out
+        assert out["test_id"] == "dp-b"
+        assert out["scenario_index"] == 2
+
+    def test_get_conversation_transcript_index_out_of_range_message(self):
+        mock_okareo, run = self._multiturn_run_and_points()
+
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.find_test_runs", return_value=run):
+            tools = _tests_tools()
+            out = json.loads(tools["get_conversation_transcript"](
+                test_run_id="run-1", scenario_index=7,
+            ))
+
+        assert "valid indices 1-3" in out["error"]
+
+    def test_get_test_run_results_assigns_positional_scenario_index(self):
+        mock_okareo, run = self._multiturn_run_and_points()
+
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.find_test_runs", return_value=run):
+            tools = _tests_tools()
+            out = json.loads(tools["get_test_run_results"](test_run_id="run-1"))
+
+        assert [d["scenario_index"] for d in out["data_points"]] == [1, 2, 3]
+
+
+class TestListToolsSkipRowLevelMetrics:
+    """find_test_runs has no limit parameter, so the only lever a list tool has on
+    response size is return_model_metrics. Asking for row-level metrics pulls a
+    written explanation per check per row for every run in the project, which
+    overruns Cloud Run's response cap and fails the request with a bare HTTP 500.
+    """
+
+    def test_list_test_runs_does_not_request_row_level_metrics(self):
+        from unittest.mock import MagicMock, patch
+
+        tools = _tests_tools()
+        find = MagicMock(return_value=[])
+
+        with patch("src.tools.tests.get_okareo_client", return_value=MagicMock()), \
+             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.find_test_runs", find):
+            json.loads(tools["list_test_runs"]())
+
+        payload = find.call_args[0][1]
+        assert payload.return_model_metrics is False

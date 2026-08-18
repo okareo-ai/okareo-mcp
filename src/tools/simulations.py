@@ -22,6 +22,7 @@ from typing import Optional
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 
+from src.analytics_context import annotate
 from src.error_handling import format_tool_error
 from src.okareo_client import (
     find_test_runs,
@@ -37,6 +38,111 @@ def _get_attr(obj, attr, default=None):
     if type(val).__name__ == "Unset":
         return default
     return val
+
+
+_CANDIDATE_LIMIT = 25
+
+
+def _fetch_targets(okareo, project_id) -> list[dict]:
+    """Return ``[{id, name, type}]`` for simulation targets, ``[]`` if unavailable.
+
+    Used only for error enrichment and based_on_run_id resolution, so a failed
+    lookup degrades to an empty list rather than aborting the caller.
+    """
+    from okareo_api_client.api.default import (
+        get_all_models_under_test_v0_models_under_test_get,
+    )
+    from okareo_api_client.errors import UnexpectedStatus
+
+    try:
+        muts = get_all_models_under_test_v0_models_under_test_get.sync(
+            client=okareo.client,
+            project_id=project_id,
+            api_key=okareo.api_key,
+        )
+    except UnexpectedStatus as e:
+        if e.status_code != 200:
+            return []
+        try:
+            muts = json.loads(e.content)
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+    if not muts or isinstance(muts, Exception):
+        return []
+
+    target_type_keys = {"voice", "custom_endpoint"}
+    targets = []
+    for m in muts:
+        if isinstance(m, dict):
+            models_dict = m.get("models") or {}
+            mut_id, mut_name = m.get("id", ""), m.get("name", "")
+        else:
+            models_dict = _serialize_value(_get_attr(m, "models")) or {}
+            mut_id, mut_name = _get_attr(m, "id", ""), _get_attr(m, "name", "")
+        if not isinstance(models_dict, dict):
+            continue
+        matched_types = target_type_keys.intersection(models_dict.keys())
+        if not matched_types:
+            continue
+        targets.append({
+            "id": str(mut_id or ""),
+            "name": mut_name or "",
+            "type": next(iter(matched_types)),
+        })
+    return targets
+
+
+def _fetch_drivers(okareo, project_id) -> list[dict]:
+    """Return ``[{id, name}]`` for Drivers, ``[]`` if unavailable."""
+    from okareo_api_client.api.default import get_all_drivers_v0_drivers_get
+
+    try:
+        drivers = get_all_drivers_v0_drivers_get.sync(
+            client=okareo.client,
+            project_id=project_id,
+            api_key=okareo.api_key,
+        )
+    except Exception:
+        return []
+
+    if not drivers or isinstance(drivers, Exception):
+        return []
+
+    result = []
+    for d in drivers:
+        if isinstance(d, dict):
+            result.append({"id": str(d.get("id", "")), "name": d.get("name", "")})
+        else:
+            result.append({
+                "id": str(_get_attr(d, "id", "") or ""),
+                "name": _get_attr(d, "name", "") or "",
+            })
+    return result
+
+
+def _scenario_candidates(all_scenarios) -> list[dict]:
+    """Summarize scenario sets for inclusion in an error payload."""
+    candidates = []
+    for s in all_scenarios or []:
+        if isinstance(s, dict):
+            name, rows = s.get("name", ""), s.get("scenario_count", 0)
+        else:
+            name, rows = _get_attr(s, "name", ""), _get_attr(s, "scenario_count", 0)
+        if name:
+            candidates.append({"name": name, "rows": rows or 0})
+    return candidates[:_CANDIDATE_LIMIT]
+
+
+def _closest_names(wanted: str, names: list[str]) -> list[str]:
+    """Near-matches for a name the user got slightly wrong."""
+    import difflib
+
+    if not wanted:
+        return []
+    return difflib.get_close_matches(wanted, names, n=3, cutoff=0.6)
 
 
 def _serialize_value(val):
@@ -1235,6 +1341,12 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
+        project_id = None
+        try:
+            project_id = resolve_project_id(okareo)
+        except Exception:
+            pass
+
         # Validate voice / voice_profile against the catalog so a typo is
         # caught here rather than producing an unusable driver (FR-032). The
         # catalog being unavailable is non-fatal — validation is skipped and
@@ -1340,6 +1452,14 @@ def register_tools(mcp: FastMCP) -> None:
             return format_tool_error(e)
 
         result = result if isinstance(result, dict) else {}
+        driver_id = str(result.get("id", ""))
+        annotate(
+            project_id=project_id,
+            entity_type="driver",
+            entity_id=driver_id or None,
+            is_voice=bool(voice or voice_profile or voice_instructions),
+            language=language,
+        )
         return json.dumps({
             "driver_id": result.get("id", ""),
             "name": result.get("name", name),
@@ -1616,10 +1736,15 @@ def register_tools(mcp: FastMCP) -> None:
 
         Args:
             name: Human-readable name for this simulation run.
-            scenario_name: Name of the scenario to use. Required unless based_on_run_id
-                is provided and the original run's scenario can be resolved.
-            target_name: Name of the target to evaluate. Required unless based_on_run_id
-                is provided and the original run's target can be resolved.
+            scenario_name: Name of an existing scenario set (from list_scenarios,
+                or one you just created with save_scenario) supplying the test
+                cases. Always pass this — it is optional only when
+                based_on_run_id is given AND that run's scenario set still
+                exists. Never invent a name; if you do not have one, call
+                list_scenarios or save_scenario first.
+            target_name: Name of the target to evaluate (from list_targets or
+                create_or_update_target). Same rule as scenario_name: always
+                pass it unless based_on_run_id can supply it.
             driver_name: Name of the driver persona. If omitted, the project default
                 driver is used.
             checks: List of check names to apply (from list_checks). Pick from
@@ -1708,6 +1833,36 @@ def register_tools(mcp: FastMCP) -> None:
         resolved_target_name = target_name
         resolved_driver_name = driver_name
 
+        # Fetched once: the same list resolves based_on_run_id's scenario, backs
+        # the name lookup, and enumerates candidates when either one misses.
+        try:
+            all_scenarios = get_scenario_sets_v0_scenario_sets_get.sync(
+                client=okareo.client,
+                project_id=project_id,
+                api_key=okareo.api_key,
+            )
+        except Exception as e:
+            return format_tool_error(e)
+        if isinstance(all_scenarios, Exception):
+            return format_tool_error(all_scenarios)
+        if all_scenarios is None:
+            all_scenarios = []
+        if not isinstance(all_scenarios, list):
+            # An ErrorResponse here would otherwise masquerade as "this project
+            # has no scenarios", sending the caller off to create a duplicate.
+            detail = _serialize_value(all_scenarios)
+            return json.dumps({
+                "error": (
+                    "Could not list scenarios for this project, so the "
+                    "simulation cannot be configured."
+                ),
+                "detail": detail,
+            })
+
+        # Explains, in the error payload, which fields a rerun failed to carry
+        # over — otherwise an unresolvable run reads as "you passed nothing".
+        rerun_notes: list[str] = []
+
         # If rerunning, fetch original run params as defaults
         if based_on_run_id:
             try:
@@ -1739,20 +1894,31 @@ def register_tools(mcp: FastMCP) -> None:
                         if original_is_dict
                         else _get_attr(original, "scenario_set_id")
                     )
-                    if orig_scenario_id:
-                        try:
-                            all_scenarios = get_scenario_sets_v0_scenario_sets_get.sync(
-                                client=okareo.client,
-                                project_id=project_id,
-                                api_key=okareo.api_key,
+                    if not orig_scenario_id:
+                        rerun_notes.append(
+                            f"Run '{based_on_run_id}' has no scenario set "
+                            "recorded, so scenario_name could not be inherited."
+                        )
+                    else:
+                        for s in all_scenarios:
+                            s_id = (
+                                s.get("scenario_id")
+                                if isinstance(s, dict)
+                                else _get_attr(s, "scenario_id")
                             )
-                            if all_scenarios and not isinstance(all_scenarios, Exception):
-                                for s in all_scenarios:
-                                    if _get_attr(s, "scenario_id") == orig_scenario_id:
-                                        resolved_scenario_name = _get_attr(s, "name")
-                                        break
-                        except Exception:
-                            pass
+                            if str(s_id) == str(orig_scenario_id):
+                                resolved_scenario_name = (
+                                    s.get("name")
+                                    if isinstance(s, dict)
+                                    else _get_attr(s, "name")
+                                )
+                                break
+                        if not resolved_scenario_name:
+                            rerun_notes.append(
+                                f"The scenario set ({orig_scenario_id}) used by run "
+                                f"'{based_on_run_id}' no longer exists in this "
+                                "project, so scenario_name could not be inherited."
+                            )
 
                 # Resolve target name from original run if not overridden
                 if not resolved_target_name:
@@ -1761,15 +1927,22 @@ def register_tools(mcp: FastMCP) -> None:
                         if original_is_dict
                         else _get_attr(original, "mut_id")
                     )
-                    if orig_mut_id:
-                        try:
-                            orig_target = okareo.get_target_by_name(
-                                original.get("name", "") if original_is_dict else _get_attr(original, "name", "")
+                    if not orig_mut_id:
+                        rerun_notes.append(
+                            f"Run '{based_on_run_id}' has no target recorded, "
+                            "so target_name could not be inherited."
+                        )
+                    else:
+                        for t in _fetch_targets(okareo, project_id):
+                            if t["id"] == str(orig_mut_id):
+                                resolved_target_name = t["name"]
+                                break
+                        if not resolved_target_name:
+                            rerun_notes.append(
+                                f"The target ({orig_mut_id}) used by run "
+                                f"'{based_on_run_id}' no longer exists in this "
+                                "project, so target_name could not be inherited."
                             )
-                            if orig_target:
-                                resolved_target_name = _get_attr(orig_target, "name")
-                        except Exception:
-                            pass
 
                 # Resolve driver name from original run if not overridden
                 if not resolved_driver_name:
@@ -1779,58 +1952,79 @@ def register_tools(mcp: FastMCP) -> None:
                         else _get_attr(original, "driver_id")
                     )
                     if orig_driver_id:
-                        try:
-                            orig_driver = okareo.get_driver_by_name(orig_driver_id)
-                            if orig_driver:
-                                resolved_driver_name = _get_attr(orig_driver, "name")
-                        except Exception:
-                            pass
+                        for d in _fetch_drivers(okareo, project_id):
+                            if d["id"] == str(orig_driver_id):
+                                resolved_driver_name = d["name"]
+                                break
 
             except Exception as e:
                 return format_tool_error(e)
 
         # Validate required fields after rerun resolution
         if not resolved_scenario_name:
-            return json.dumps({
+            payload = {
                 "error": (
-                    "scenario_name is required. "
-                    "Provide it directly or via based_on_run_id."
+                    "scenario_name is required — a simulation needs a scenario "
+                    "set to supply its test cases. Pass the name of one of "
+                    "available_scenarios, or create one with save_scenario "
+                    "(then retry). based_on_run_id also supplies it, but only "
+                    "when the original run's scenario set still exists."
                 ),
-            })
+                "available_scenarios": _scenario_candidates(all_scenarios),
+            }
+            if rerun_notes:
+                payload["based_on_run_id"] = based_on_run_id
+                payload["rerun_notes"] = rerun_notes
+            return json.dumps(payload)
+
         if not resolved_target_name:
-            return json.dumps({
+            targets = _fetch_targets(okareo, project_id)
+            payload = {
                 "error": (
-                    "target_name is required. "
-                    "Provide it directly or via based_on_run_id."
+                    "target_name is required — a simulation needs a Target to "
+                    "converse with. Pass the name of one of available_targets, "
+                    "or create one with create_or_update_target (then retry)."
                 ),
-            })
+                "available_targets": [
+                    {"name": t["name"], "type": t["type"]}
+                    for t in targets[:_CANDIDATE_LIMIT]
+                ],
+            }
+            if rerun_notes:
+                payload["based_on_run_id"] = based_on_run_id
+                payload["rerun_notes"] = rerun_notes
+            return json.dumps(payload)
 
         # Resolve scenario object
-        try:
-            all_scenarios = get_scenario_sets_v0_scenario_sets_get.sync(
-                client=okareo.client,
-                project_id=project_id,
-                api_key=okareo.api_key,
-            )
-        except Exception as e:
-            return format_tool_error(e)
-
         resolved_scenario = None
-        if all_scenarios and not isinstance(all_scenarios, Exception):
-            for s in all_scenarios:
-                if _get_attr(s, "name") == resolved_scenario_name:
-                    resolved_scenario = s
-                    break
+        for s in all_scenarios:
+            s_name = s.get("name") if isinstance(s, dict) else _get_attr(s, "name")
+            if s_name == resolved_scenario_name:
+                resolved_scenario = s
+                break
 
         if resolved_scenario is None:
-            return json.dumps({
+            candidates = _scenario_candidates(all_scenarios)
+            payload = {
                 "error": (
-                    f"Scenario '{resolved_scenario_name}' not found. "
-                    "Use list_scenarios to see available scenarios."
+                    f"Scenario '{resolved_scenario_name}' not found in this "
+                    "project. Pass the name of one of available_scenarios, or "
+                    "create it with save_scenario (then retry)."
                 ),
-            })
+                "available_scenarios": candidates,
+            }
+            close = _closest_names(
+                resolved_scenario_name, [c["name"] for c in candidates]
+            )
+            if close:
+                payload["did_you_mean"] = close
+            return json.dumps(payload)
 
-        row_count = _get_attr(resolved_scenario, "scenario_count", 0)
+        row_count = (
+            resolved_scenario.get("scenario_count", 0)
+            if isinstance(resolved_scenario, dict)
+            else _get_attr(resolved_scenario, "scenario_count", 0)
+        )
         if row_count == 0:
             return json.dumps({
                 "error": (
@@ -2046,6 +2240,17 @@ def register_tools(mcp: FastMCP) -> None:
             scenario_set_id=scenario_set_id,
             name=name,
         )
+        # Annotate in the tool stack (not the worker thread) so the ContextVar
+        # binding is visible to the wrapper.
+        annotate(
+            project_id=project_id,
+            entity_type="test_run",
+            entity_id=str(run_id) if run_id else None,
+            run_status=status,
+            repeats=repeats,
+            max_turns=max_turns,
+            is_rerun=bool(based_on_run_id),
+        )
         if status == "failed":
             # If the auto-applied default check is what the backend rejected,
             # name it — a simulation must never silently run check-less.
@@ -2109,8 +2314,10 @@ def register_tools(mcp: FastMCP) -> None:
         Returns simulation run names, IDs, timestamps, and status, sorted by
         most recent first. Defaults to the 10 most recent runs in summary mode.
 
-        Use detail_level="detailed" to include model_metrics and additional
-        fields (limit is capped to 5 in detailed mode to prevent overflow).
+        Use detail_level="detailed" to include aggregate model_metrics and
+        additional fields (limit is capped to 5 in detailed mode). Per-row
+        scores and explanations are not returned by either mode — use
+        get_test_run_results for those.
 
         Use get_test_run_results with the returned test_run_id to retrieve
         per-row scores (transcripts excluded by default). Then use
@@ -2125,8 +2332,9 @@ def register_tools(mcp: FastMCP) -> None:
             limit: Maximum number of runs to return, sorted by most recent
                 first. Defaults to 10. Set to 0 to return all runs.
             detail_level: "summary" (default) returns compact results without
-                model_metrics. "detailed" returns full results with metrics
-                (limit capped to 5).
+                model_metrics. "detailed" adds aggregate model_metrics
+                (mean_scores, percentile_scores, aggregate_*) and caps limit
+                to 5. Neither mode returns per-row scores.
         """
         if detail_level not in ("summary", "detailed"):
             return json.dumps({
@@ -2150,9 +2358,18 @@ def register_tools(mcp: FastMCP) -> None:
             return format_tool_error(e)
 
         # Build filter payload — always filter to MULTI_TURN (simulations)
+        # Not gated on detail_level. `limit` -- including the cap to 5 that detailed
+        # mode applies "to prevent overflow" -- is a client-side slice taken after
+        # the whole list has already crossed the wire, so detailed mode would pull
+        # every MULTI_TURN run in the project with its row-level prose attached and
+        # overrun the response cap exactly like summary mode did. Nothing here can
+        # bound the row count until find_test_runs grows a limit parameter, so the
+        # only safe request is one that omits the row-level payload. Detailed mode
+        # keeps rendering the aggregates it still receives; per-row scores come from
+        # get_test_run_results. See the note in list_test_runs.
         payload_kwargs: dict = {
             "project_id": project_id,
-            "return_model_metrics": True,
+            "return_model_metrics": False,
             "types": [TestRunType.MULTI_TURN],
         }
 

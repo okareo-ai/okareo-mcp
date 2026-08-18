@@ -52,6 +52,179 @@ def _capture_payload():
     return captured, _fake_send
 
 
+class TestGroupAssociation:
+    def test_groups_present_when_org_id_bound(self):
+        client, _ = _client("streamable-http")
+        captured, fake_send = _capture_payload()
+
+        async def run():
+            set_session_credential(
+                SessionCredential(
+                    kind="oauth", api_key="k", org_id="org-ACME", subject="u",
+                )
+            )
+            with patch("src.analytics._send_event", fake_send):
+                emit_tool_event(client, tool_name="t", success=True)
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        props = captured[0]["properties"]
+        assert props["org_id"] == "org-ACME"
+        assert props["$groups"] == {"organization": "org-ACME"}
+
+    def test_groups_absent_in_stdio(self):
+        client, _ = _client("stdio")
+        captured, fake_send = _capture_payload()
+
+        async def run():
+            set_session_credential(
+                SessionCredential(
+                    kind="oauth", api_key="k", org_id="org-ACME",
+                )
+            )
+            with patch("src.analytics._send_event", fake_send):
+                emit_tool_event(client, tool_name="t", success=True)
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        props = captured[0]["properties"]
+        assert "$groups" not in props
+        assert "org_id" not in props
+
+
+class TestGroupIdentify:
+    def test_groupidentify_once_per_org_with_name(self):
+        from src.analytics import _store_org_name
+
+        client, _ = _client("streamable-http")
+        captured, fake_send = _capture_payload()
+        _store_org_name("org-ACME", "Acme Corp")
+
+        async def run():
+            set_session_credential(
+                SessionCredential(
+                    kind="oauth",
+                    api_key="k",
+                    org_id="org-ACME",
+                    subject="user-42",
+                    email="dev@example.com",
+                )
+            )
+            with patch("src.analytics._send_event", fake_send):
+                emit_tool_event(client, tool_name="a", success=True)
+                emit_tool_event(client, tool_name="b", success=True)
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        events = [p["event"] for p in captured]
+        assert events.count("$groupidentify") == 1
+        gi = next(p for p in captured if p["event"] == "$groupidentify")
+        assert gi["properties"]["$group_type"] == "organization"
+        assert gi["properties"]["$group_key"] == "org-ACME"
+        assert gi["properties"]["$group_set"] == {"name": "Acme Corp"}
+        assert gi["properties"]["$process_person_profile"] is False
+        # Sequenced before the first tool event.
+        first_tool = next(
+            i for i, p in enumerate(captured) if p["event"] == "okareo_mcp_tool_call"
+        )
+        gi_idx = next(
+            i for i, p in enumerate(captured) if p["event"] == "$groupidentify"
+        )
+        assert gi_idx < first_tool
+        tool_event = next(
+            p for p in captured if p["event"] == "okareo_mcp_tool_call"
+        )
+        assert tool_event["properties"]["org_name"] == "Acme Corp"
+
+    def test_never_emitted_without_resolved_name(self):
+        client, _ = _client("streamable-http")
+        captured, fake_send = _capture_payload()
+
+        async def run():
+            set_session_credential(
+                SessionCredential(
+                    kind="oauth", api_key="k", org_id="org-ACME", subject="u",
+                )
+            )
+            with patch("src.analytics._send_event", fake_send), \
+                 patch("src.analytics._schedule_org_name_resolution"):
+                emit_tool_event(client, tool_name="t", success=True)
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        assert all(p["event"] != "$groupidentify" for p in captured)
+        assert "org_name" not in captured[0]["properties"]
+
+
+class TestOrgNameResolutionFailure:
+    def test_raising_lookup_never_blocks_event(self):
+        client, _ = _client("streamable-http")
+        captured, fake_send = _capture_payload()
+
+        async def _boom(**kwargs):
+            raise RuntimeError("frontegg down")
+
+        async def run():
+            set_session_credential(
+                SessionCredential(
+                    kind="oauth",
+                    api_key="jwt-token",
+                    org_id="org-ACME",
+                    subject="u",
+                )
+            )
+            with patch("src.analytics._send_event", fake_send), \
+                 patch(
+                     "src.auth.frontegg_user_info.get_user_tenants",
+                     side_effect=_boom,
+                 ):
+                emit_tool_event(client, tool_name="t", success=True)
+                # Let the background resolution task run and fail.
+                await asyncio.sleep(0.05)
+
+        asyncio.run(run())
+        assert any(p["event"] == "okareo_mcp_tool_call" for p in captured)
+        from src.analytics import _org_names
+        assert _org_names.get("org-ACME") is None
+
+        # Negative sentinel prevents a second attempt.
+        captured.clear()
+
+        async def run2():
+            with patch("src.analytics._send_event", fake_send), \
+                 patch(
+                     "src.auth.frontegg_user_info.get_user_tenants",
+                     side_effect=_boom,
+                 ) as mock_tenants:
+                emit_tool_event(client, tool_name="t2", success=True)
+                await asyncio.sleep(0.05)
+                mock_tenants.assert_not_called()
+
+        asyncio.run(run2())
+
+    def test_api_key_session_resolves_no_name(self):
+        client, _ = _client("streamable-http")
+        captured, fake_send = _capture_payload()
+
+        async def run():
+            set_session_credential(
+                SessionCredential(
+                    kind="api_key", api_key="okareo-key", org_id="org-KEY",
+                )
+            )
+            with patch("src.analytics._send_event", fake_send), \
+                 patch("src.analytics._schedule_org_name_resolution") as sched:
+                emit_tool_event(client, tool_name="t", success=True)
+                await asyncio.sleep(0)
+                sched.assert_not_called()
+
+        asyncio.run(run())
+        props = captured[0]["properties"]
+        assert props["org_id"] == "org-KEY"
+        assert props["$groups"] == {"organization": "org-KEY"}
+        assert "org_name" not in props
+
+
 class TestHTTPModePrincipal:
     def test_uses_org_id_from_credential(self):
         client, _ = _client("streamable-http")

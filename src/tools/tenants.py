@@ -28,6 +28,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from src.analytics import remember_org_names
 from src.auth.context import get_session_credential_optional
 from src.auth.frontegg_user_info import (
     TenantLookupAuthError,
@@ -107,6 +108,8 @@ def register_tools(mcp: FastMCP) -> None:
                 "Could not fetch the tenant list from the identity provider.",
                 data={"retriable": True},
             )
+
+        remember_org_names(tenants)
 
         return json.dumps(
             {
