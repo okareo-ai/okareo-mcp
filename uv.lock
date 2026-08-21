@@ -638,7 +638,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/e1/8d/d17254baea57fe4a7
 
 [[package]]
 name = "okareo"
-version = "0.0.144"
+version = "0.0.146"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -657,14 +657,14 @@ dependencies = [
     { name = "tqdm" },
     { name = "types-python-dateutil" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b8/98/b5b2f281a3a1a40e3c393bdf0fb3cfa7f5f69c6017993ba1a0572b6395b0/okareo-0.0.144.tar.gz", hash = "sha256:7db499c2ad4f3e2f2a2fe674a0e19dbd5d129da8fc871b689dcb397f5025d6ba", size = 1088385, upload-time = "2026-07-23T23:16:38.154Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/51/b23f3bc75d06e275a8f821b1de7378c0d98c2942c53c56553fab8fa11839/okareo-0.0.146.tar.gz", hash = "sha256:c9d4eb1f830fe8b2dea0cb97583fda10950a64c847939d0cb50ea017d7124e9b", size = 1104518, upload-time = "2026-08-17T01:14:27.925Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/5e/984e18fdf5b6f3f55b83e3c0aaddabeeb623b81101273eb68acd794ebe91/okareo-0.0.144-py3-none-any.whl", hash = "sha256:59abe7974660c5e304ef4999d073d8043abbf3dc807c1598c65669c189da4cbf", size = 1409245, upload-time = "2026-07-23T23:16:39.431Z" },
+    { url = "https://files.pythonhosted.org/packages/87/df/10aa82aa42e5f38c4ad81038158f7c43eaaaea2a33d8124e4d957d3026ad/okareo-0.0.146-py3-none-any.whl", hash = "sha256:07a9dcdf57c95f9346fdd67e93c6a1d2c14fe8622936c3897b8375a4120ceff3", size = 1429014, upload-time = "2026-08-17T01:14:30.056Z" },
 ]
 
 [[package]]
 name = "okareo-mcp"
-version = "0.0.43"
+version = "0.0.46"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -692,7 +692,7 @@ requires-dist = [
     { name = "httpx" },
     { name = "langcodes", extras = ["data"], specifier = ">=3.3" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.27" },
-    { name = "okareo", specifier = ">=0.0.144,<0.0.145" },
+    { name = "okareo", specifier = ">=0.0.146,<0.0.147" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.9" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "python-dotenv", specifier = ">=1.0" },

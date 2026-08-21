@@ -20,6 +20,111 @@ _BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9._\-+/=_]{20,}")
 _AUTHZ_HEADER_PATTERN = re.compile(r"Authorization:\s*\S+", re.IGNORECASE)
 
 
+# Where new Projects come from. The MCP is read-only over Projects (FR-025),
+# so any surface that could read as "ask the server to make one" must say
+# where creation actually happens (FR-026).
+PROJECT_CREATION_NOTE = "New projects are created in the Okareo web application."
+
+
+class ProjectError(Exception):
+    """Base for project-resolution failures carrying a machine-readable code.
+
+    Callers must be able to tell these apart from an artifact-not-found
+    (FR-030): "exists but belongs to another project" and "you have not
+    chosen a project" are different problems with different remedies.
+    """
+
+    code = "project_error"
+    suggestion = "Specify a project and try again."
+
+    def __init__(
+        self,
+        message: str,
+        projects: list[dict[str, str]] | None = None,
+        **data: object,
+    ) -> None:
+        super().__init__(message)
+        self.projects = projects or []
+        self.data = data
+
+
+class ProjectNotSelected(ProjectError):
+    """No project resolved and the organization has more than one (FR-020)."""
+
+    code = "project_not_selected"
+    suggestion = (
+        "Ask the user which project they want, then pass it as `project` on "
+        "the call. Record their choice and reuse it in later conversations."
+    )
+
+
+class ProjectNotFound(ProjectError):
+    """A named project does not exist or is not accessible (FR-006)."""
+
+    code = "project_not_found"
+    suggestion = (
+        "Check the name or id against the available projects. The previously "
+        "active project is unchanged."
+    )
+
+
+class ProjectMisconfigured(ProjectError):
+    """A connection pin names a project that cannot be resolved (US4 sc. 3).
+
+    Split from ProjectNotFound because the remedy differs: a conversational
+    error is fixed by answering, a pin error only by editing the connection
+    configuration.
+    """
+
+    code = "project_misconfigured"
+    suggestion = (
+        "Fix the project pinned in your MCP connection configuration — this "
+        "cannot be corrected from the conversation."
+    )
+
+
+# NOTE (FR-030a): a generic not-found must NOT be dressed up as a project
+# problem. An earlier revision appended "not found in project X — it may
+# belong to another project" to every 404 whenever a project was resolved,
+# which is nearly every project-scoped call. It asserted a cause it had never
+# established, and misdiagnosed a same-project failure by sending the user to
+# look for a project that was not the problem. Only ArtifactNotInProject below
+# may make that claim: it is raised by the name resolver, which has just
+# listed the acting project and therefore knows.
+
+
+class ArtifactNotInProject(ProjectError):
+    """A named artifact does not exist in the acting project (FR-001a).
+
+    Distinct from ProjectNotFound, which is about the *project* not existing.
+    This one is raised only by the name resolver, which has just listed the
+    project and therefore knows — the generic error path must never guess at
+    this (FR-030a).
+    """
+
+    code = "artifact_not_in_project"
+    suggestion = (
+        "Use one of the artifacts available in this project, or switch to the "
+        "project that contains the one you want."
+    )
+
+
+def _format_project_error(exc: ProjectError) -> str:
+    """Render a ProjectError through the standard envelope, plus its code."""
+    payload: dict[str, object] = {
+        "category": "validation",
+        "code": exc.code,
+        "message": str(exc),
+        "suggestion": exc.suggestion,
+    }
+    if exc.projects:
+        payload["projects"] = exc.projects
+    payload.update(exc.data)
+    if exc.code == "project_not_selected":
+        payload["note"] = PROJECT_CREATION_NOTE
+    return json.dumps({"error": payload})
+
+
 def _redact_credentials(text: str) -> str:
     """Strip bearer tokens and Authorization-header values from ``text``.
 
@@ -217,6 +322,9 @@ def format_tool_error(
     Returns:
         A JSON string: {"error": {"category": ..., "message": ..., "suggestion": ...}}
     """
+    if isinstance(exc, ProjectError):
+        return _format_project_error(exc)
+
     if key_registry is None:
         key_registry = {}
 
@@ -235,6 +343,7 @@ def format_tool_error(
             "This capability may not be enabled for your Okareo account or "
             "project. Verify at app.okareo.com or contact Okareo support."
         )
+
 
     # Sanitize: strip provider keys
     message = sanitize_error(message, key_registry)

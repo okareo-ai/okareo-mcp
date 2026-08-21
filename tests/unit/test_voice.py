@@ -4,6 +4,29 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from src.okareo_client import ResolvedProject
+
+
+@pytest.fixture(autouse=True)
+def _default_project_list():
+    """Make the real project resolver usable in tests that only mock the client.
+
+    036-project-scoping: tools now resolve a project, so a bare MagicMock
+    client would otherwise return a MagicMock from get_projects(). A
+    single-project organization is the pre-feature default and keeps these
+    tests asserting what they were written to assert.
+    """
+    from unittest.mock import patch as _patch
+
+    from src.okareo_client import ResolvedProject, _reset_for_tests
+
+    _reset_for_tests()
+    resolved = ResolvedProject(
+        id="00000000-0000-4000-8000-000000000001", name="Global", basis="default",
+    )
+    with _patch("src.tools.voice.resolve_project", return_value=resolved):
+        yield
+    _reset_for_tests()
 
 
 def _register_and_get_tools():
@@ -32,7 +55,7 @@ def set_api_key(monkeypatch):
 # ---------------------------------------------------------------------------
 
 class TestIngestConversations:
-    @patch("src.tools.voice.resolve_project_id")
+    @patch("src.tools.voice.resolve_project")
     @patch("src.tools.voice.get_okareo_client")
     def test_transcript_conversation_accepted(
         self, mock_client, mock_resolve, tools
@@ -40,7 +63,7 @@ class TestIngestConversations:
         okareo = MagicMock()
         okareo.ingest_conversations.return_value = {"datapoints_created": 2}
         mock_client.return_value = okareo
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
 
         result = json.loads(tools["ingest_conversations"](conversations=[
             {
@@ -59,7 +82,7 @@ class TestIngestConversations:
         assert call.kwargs["project_id"] == "proj-1"
         assert call.kwargs["mut_id"] is None
 
-    @patch("src.tools.voice.resolve_project_id")
+    @patch("src.tools.voice.resolve_project")
     @patch("src.tools.voice.get_okareo_client")
     def test_audio_reference_conversation_accepted(
         self, mock_client, mock_resolve, tools
@@ -67,7 +90,7 @@ class TestIngestConversations:
         okareo = MagicMock()
         okareo.ingest_conversations.return_value = {"datapoints_created": 1}
         mock_client.return_value = okareo
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
 
         result = json.loads(tools["ingest_conversations"](
             conversations=[
@@ -79,7 +102,7 @@ class TestIngestConversations:
         assert result["accepted"] == 1
         assert okareo.ingest_conversations.call_args.kwargs["mut_id"] == "mut-9"
 
-    @patch("src.tools.voice.resolve_project_id")
+    @patch("src.tools.voice.resolve_project")
     @patch("src.tools.voice.get_okareo_client")
     def test_partial_batch_rejects_invalid_only(
         self, mock_client, mock_resolve, tools
@@ -87,7 +110,7 @@ class TestIngestConversations:
         okareo = MagicMock()
         okareo.ingest_conversations.return_value = {"datapoints_created": 1}
         mock_client.return_value = okareo
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
 
         result = json.loads(tools["ingest_conversations"](conversations=[
             {"call_id": "ok", "transcript": [{"role": "user", "content": "hi"}]},
@@ -102,11 +125,11 @@ class TestIngestConversations:
         call = okareo.ingest_conversations.call_args
         assert len(call.kwargs["conversations"]) == 1
 
-    @patch("src.tools.voice.resolve_project_id")
+    @patch("src.tools.voice.resolve_project")
     @patch("src.tools.voice.get_okareo_client")
     def test_all_invalid_does_not_call_api(self, mock_client, mock_resolve, tools):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
 
         result = json.loads(tools["ingest_conversations"](conversations=[
             {"call_id": "no-audio"},
@@ -126,11 +149,11 @@ class TestIngestConversations:
 
 class TestVoiceIntegrations:
     @patch("src.tools.voice.okareo_api_request")
-    @patch("src.tools.voice.resolve_project_id")
+    @patch("src.tools.voice.resolve_project")
     @patch("src.tools.voice.get_okareo_client")
     def test_connect_integration(self, mock_client, mock_resolve, mock_request, tools):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.return_value = {"id": "int-1", "provider": "retell",
                                      "public_id": "pub-9", "status": "active"}
 

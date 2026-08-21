@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from src.okareo_client import ResolvedProject
 
 
 def _register_and_get_tools():
@@ -28,11 +29,11 @@ def set_api_key(monkeypatch):
 
 class TestQueryAnalytics:
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_basic_query(self, mock_client, mock_resolve, mock_request, tools):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.return_value = {"rows": [{"count": 5}]}
 
         result = json.loads(tools["query_analytics"](
@@ -48,11 +49,11 @@ class TestQueryAnalytics:
         assert body["dimensions"] == ["test_runs.day"]
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_query_with_metadata(self, mock_client, mock_resolve, mock_request, tools):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.side_effect = [
             {"cubes": ["test_runs"]},   # /v0/analytics/meta
             {"rows": []},               # /v0/analytics/query
@@ -70,13 +71,13 @@ class TestQueryAnalytics:
         assert "error" in result
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_query_analytics_defaults_time_range(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.return_value = {"rows": []}
 
         json.loads(tools["query_analytics"](measures=["avg_check_value"]))
@@ -86,13 +87,13 @@ class TestQueryAnalytics:
         assert "time_dimensions" not in body
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_query_analytics_time_dimensions_passthrough(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.return_value = {"rows": []}
 
         td = [{"dimension": "test_run.start_time", "granularity": "day"}]
@@ -115,13 +116,13 @@ class TestQueryAnalytics:
 
 class TestDashboards:
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_save_dashboard_creates_when_absent(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.side_effect = [
             {"items": []},                       # GET list — empty envelope
             {"id": "d-1", "name": "Trends"},     # POST create
@@ -138,13 +139,13 @@ class TestDashboards:
         assert mock_request.call_args[0][1] == "post"
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_save_dashboard_updates_when_present(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.side_effect = [
             {"items": [{"id": "d-1", "name": "Trends"}]},   # GET list — exists
             {"id": "d-1", "name": "Trends"},                # PUT update
@@ -158,13 +159,13 @@ class TestDashboards:
         assert put_call[0][2] == "/v0/dashboards/d-1"
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_save_dashboard_no_duplicate_on_resave(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         # Second save of an existing name must PUT (update), never POST again.
         mock_request.side_effect = [
             {"items": [{"id": "d-1", "name": "Trends"}]},   # GET list — exists
@@ -183,13 +184,13 @@ class TestDashboards:
         assert "post" not in methods
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_save_dashboard_time_range_string(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.side_effect = [
             {"items": []},                       # GET list — empty
             {"id": "d-1", "name": "Trends"},     # POST create
@@ -210,13 +211,13 @@ class TestDashboards:
         assert "LAST_30_DAYS" in result["error"]
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_save_dashboard_accepts_panel_shape(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.side_effect = [
             {"items": []},                       # GET list — empty
             {"id": "d-1", "name": "Trends"},     # POST create
@@ -237,13 +238,13 @@ class TestDashboards:
         assert "adjustments" not in result
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_get_dashboard_found(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.side_effect = [
             {"items": [{"id": "d-1", "name": "Trends"}]},   # GET list envelope
             {"id": "d-1", "name": "Trends", "panels": []},  # GET by id
@@ -255,11 +256,11 @@ class TestDashboards:
         assert result["dashboard"]["id"] == "d-1"
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_list_dashboards(self, mock_client, mock_resolve, mock_request, tools):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.return_value = {
             "items": [{"id": "d-1", "name": "A"}, {"id": "d-2", "name": "B"}]
         }
@@ -270,11 +271,11 @@ class TestDashboards:
         assert {d["name"] for d in result["dashboards"]} == {"A", "B"}
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_reorder_dashboards(self, mock_client, mock_resolve, mock_request, tools):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.side_effect = [
             {"items": [{"id": "d-1", "name": "A"}, {"id": "d-2", "name": "B"}]},  # GET list
             None,                                                                # PUT reorder
@@ -287,13 +288,13 @@ class TestDashboards:
         assert reorder_call[1]["json"]["ordered_ids"] == ["d-2", "d-1"]
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_delete_dashboard_not_found(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.return_value = {"items": []}
 
         result = json.loads(tools["delete_dashboard"](name="ghost"))
@@ -301,13 +302,13 @@ class TestDashboards:
         assert "not found" in result["error"]
 
     @patch("src.tools.insights.okareo_api_request")
-    @patch("src.tools.insights.resolve_project_id")
+    @patch("src.tools.insights.resolve_project")
     @patch("src.tools.insights.get_okareo_client")
     def test_delete_dashboard_found(
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_request.side_effect = [
             {"items": [{"id": "d-1", "name": "Trends"}]},   # GET list envelope
             None,                                           # DELETE
@@ -347,7 +348,7 @@ def _save(tools, mock_request, panels, saves=1):
 
 
 @patch("src.tools.insights.okareo_api_request")
-@patch("src.tools.insights.resolve_project_id")
+@patch("src.tools.insights.resolve_project")
 @patch("src.tools.insights.get_okareo_client")
 class TestCardSizes:
     """US1 — named card sizes resolve to exact catalog dimensions."""
@@ -358,7 +359,7 @@ class TestCardSizes:
         from src.tools.insights import CARD_SIZES
 
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel(name, size=name) for name in CARD_SIZES]
 
         results, bodies = _save(tools, mock_request, panels)
@@ -394,7 +395,7 @@ class TestCardSizes:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel("A", size="half-rectangle",
                          layout={"x": 0, "y": 0, "w": 3, "h": 3})]
 
@@ -409,7 +410,7 @@ class TestCardSizes:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
 
         _, bodies = _save(tools, mock_request,
                           [_panel("A", size="small-square")])
@@ -420,7 +421,7 @@ class TestCardSizes:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel("A", size="half-rectangle"),
                   _panel("B", size="small-square"),
                   _panel("C", size="full-square")]
@@ -431,7 +432,7 @@ class TestCardSizes:
 
 
 @patch("src.tools.insights.okareo_api_request")
-@patch("src.tools.insights.resolve_project_id")
+@patch("src.tools.insights.resolve_project")
 @patch("src.tools.insights.get_okareo_client")
 class TestAutoPlacement:
     """US3 — first-fit placement: packed rows, no overlaps, explicit honored."""
@@ -444,7 +445,7 @@ class TestAutoPlacement:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel("A", size="half-rectangle"),
                   _panel("B", size="half-rectangle")]
 
@@ -458,7 +459,7 @@ class TestAutoPlacement:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel("A", size="half-rectangle"),
                   _panel("B", size="small-square"),
                   _panel("C", size="small-square")]
@@ -474,7 +475,7 @@ class TestAutoPlacement:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel("A", size="full-rectangle"),
                   _panel("B", size="half-rectangle"),
                   _panel("C", size="half-square")]
@@ -490,7 +491,7 @@ class TestAutoPlacement:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel("A", size="half-rectangle",
                          layout={"x": 6, "y": 12})]
 
@@ -518,7 +519,7 @@ class TestAutoPlacement:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [
             _panel("Fixed", layout={"x": 0, "y": 0, "w": 6, "h": 6}),
             _panel("Auto", size="half-rectangle"),
@@ -552,7 +553,7 @@ class TestSizeGuidance:
 
 
 @patch("src.tools.insights.okareo_api_request")
-@patch("src.tools.insights.resolve_project_id")
+@patch("src.tools.insights.resolve_project")
 @patch("src.tools.insights.get_okareo_client")
 class TestHeightNormalization:
     """US4 — raw heights below the width-band floor are sized up on save."""
@@ -561,7 +562,7 @@ class TestHeightNormalization:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel("Squished", layout={"x": 0, "y": 0, "w": 6, "h": 2})]
 
         results, bodies = _save(tools, mock_request, panels)
@@ -576,7 +577,7 @@ class TestHeightNormalization:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel("Wide", layout={"x": 0, "y": 0, "w": 12, "h": 5})]
 
         results, bodies = _save(tools, mock_request, panels)
@@ -589,7 +590,7 @@ class TestHeightNormalization:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         panels = [_panel("A", layout={"x": 0, "y": 0, "w": 3, "h": 6}),
                   _panel("B", layout={"x": 0, "y": 6, "w": 12, "h": 9})]
 
@@ -605,7 +606,7 @@ class TestHeightNormalization:
         self, mock_client, mock_resolve, mock_request, tools
     ):
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         # Panels shaped like get_dashboard output (raw layouts, compliant
         # dims) must re-save byte-identical — the get -> modify -> save
         # round-trip is part of the contract (spec 027 FR-008).

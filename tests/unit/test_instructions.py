@@ -12,6 +12,7 @@ REGISTERED_TOOLS = {
     "create_scenario_version",
     "preview_delete_scenario",
     "delete_scenario",
+    "move_scenario",
     # Generation Models
     "list_available_llms",
     "register_generation_model",
@@ -66,6 +67,9 @@ REGISTERED_TOOLS = {
     # Tenant management (FR-023..FR-029, added 2026-05-18)
     "list_tenants",
     "switch_tenant",
+    # Projects (036-project-scoping) — read-only: no creation tool exists
+    "list_projects",
+    "select_project",
 }
 
 
@@ -107,6 +111,10 @@ def test_instructions_tool_names_valid():
         "model_metrics",
         "scenario_index",
         "estimated_runtime",
+        # Project error codes (not tool names) — 036-project-scoping
+        "project_not_selected",
+        "project_not_found",
+        "project_misconfigured",
         # Tenant-selection response fields + error codes (not tool names)
         "tenant_id",
         "active_tenant_id",

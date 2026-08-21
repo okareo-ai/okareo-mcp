@@ -11,16 +11,21 @@ MCP's own product-telemetry module.
 """
 
 import json
-from typing import Optional
+from typing import Annotated, Optional
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from src.error_handling import format_tool_error
 from src.okareo_client import (
+    PROJECT_PARAM_DESC,
     get_okareo_client,
     okareo_api_request,
-    resolve_project_id,
+    project_scoped,
+
+    resolve_project,
 )
 
 # Supported relative look-back windows (the backend ``TimeRange`` enum). Both
@@ -263,6 +268,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @project_scoped
     def query_analytics(
         measures: list[str],
         dimensions: Optional[list[str]] = None,
@@ -271,6 +277,7 @@ def register_tools(mcp: FastMCP) -> None:
         time_range: Optional[str] = None,
         time_dimensions: Optional[list[dict]] = None,
         include_metadata: bool = False,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Query Okareo's product analytics to understand evaluation trends.
 
@@ -308,7 +315,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -361,7 +368,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def list_dashboards(limit: int = 20) -> str:
+    @project_scoped
+    def list_dashboards(limit: int = 20, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """List the analytics dashboards in your Okareo project.
 
         Args:
@@ -370,7 +378,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -401,7 +409,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def get_dashboard(name: str) -> str:
+    @project_scoped
+    def get_dashboard(name: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Retrieve a dashboard's full configuration by name.
 
         Args:
@@ -409,7 +418,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -449,11 +458,13 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @project_scoped
     def save_dashboard(
         name: str,
         panels: Optional[list[dict]] = None,
         description: Optional[str] = None,
         time_range: Optional[str] = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Create or update an analytics dashboard by name (upsert).
 
@@ -545,7 +556,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -602,7 +613,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def reorder_dashboards(ordered_names: list[str]) -> str:
+    @project_scoped
+    def reorder_dashboards(ordered_names: list[str], project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Set the display order of dashboards.
 
         Args:
@@ -613,7 +625,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -665,7 +677,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def delete_dashboard(name: str) -> str:
+    @project_scoped
+    def delete_dashboard(name: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Delete a dashboard by name.
 
         Args:
@@ -673,7 +686,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 

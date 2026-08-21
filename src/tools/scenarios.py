@@ -1,6 +1,6 @@
 """Scenario management tools for the Okareo MCP server.
 
-Provides six MCP tools for the full scenario lifecycle:
+Provides seven MCP tools for the full scenario lifecycle:
 
 - save_scenario: Create a named scenario from rows of input/result data (idempotent)
 - list_scenarios: Browse all scenarios in the project
@@ -8,12 +8,19 @@ Provides six MCP tools for the full scenario lifecycle:
 - create_scenario_version: Create a new version of an existing scenario
 - preview_delete_scenario: Preview what will be deleted before removing a scenario
 - delete_scenario: Permanently delete a scenario and its related data
+- move_scenario: Move a scenario and everything under it to another project
+  (dry-run-first; 038-scenario-move)
 """
 
 import json
 import os
 import re
-from typing import Optional
+import uuid
+from typing import Annotated, Optional
+
+import httpx
+
+from pydantic import Field
 
 from okareo_api_client.errors import UnexpectedStatus
 
@@ -22,7 +29,15 @@ from mcp.types import ToolAnnotations
 
 from src.analytics_context import annotate
 from src.error_handling import format_tool_error
-from src.okareo_client import find_test_runs, get_okareo_client, resolve_project_id
+from src.okareo_client import (
+    find_test_runs,
+    PROJECT_PARAM_DESC,
+    get_okareo_client,
+    okareo_api_request,
+    project_resolution_scope,
+    project_scoped,
+    resolve_project,
+)
 
 # FR-012: the co-pilot ingests datasets below this row count inline; larger
 # datasets are routed to manual upload to avoid unnecessary token cost.
@@ -125,6 +140,7 @@ def _save_scenario_impl(
     file_path: Optional[str] = None,
     rows: Optional[list[dict]] = None,
     tags: Optional[list[str]] = None,
+    project: Optional[str] = None,
 ) -> str:
     """Shared implementation behind the per-mode save_scenario registrations."""
     from okareo_api_client.api.default import (
@@ -193,11 +209,15 @@ def _save_scenario_impl(
 
     try:
         okareo = get_okareo_client()
-        project_id = resolve_project_id(okareo)
+        project_id = resolve_project(okareo, project).id
     except Exception as e:
         return format_tool_error(e)
 
-    # Check for existing scenario with same name (idempotent create)
+    # Check for existing scenario with same name (idempotent create).
+    # The listing is project-filtered, so "same name" means "same name in this
+    # project" — which is what FR-001a requires and what the backend's own
+    # collision rules assume. This is a short-circuit for the caller's
+    # convenience, not an alternative collision rule (FR-001c).
     try:
         scenarios = get_scenario_sets_v0_scenario_sets_get.sync(
             client=okareo.client,
@@ -330,11 +350,13 @@ def register_tools(mcp: FastMCP) -> None:
                 openWorldHint=False,
             ),
         )
+        @project_scoped
         def save_scenario(
             name: str,
             content: Optional[str] = None,
             rows: Optional[list[dict]] = None,
             tags: Optional[list[str]] = None,
+            project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
         ) -> str:
             """Save a named scenario for use in quality tests.
 
@@ -364,7 +386,9 @@ def register_tools(mcp: FastMCP) -> None:
                     'result' (any type). Use for small scenarios (< 20 rows).
                 tags: Optional list of tags for categorizing the scenario.
             """
-            return _save_scenario_impl(name, content=content, rows=rows, tags=tags)
+            return _save_scenario_impl(
+                name, content=content, rows=rows, tags=tags, project=project
+            )
 
     else:
 
@@ -377,12 +401,14 @@ def register_tools(mcp: FastMCP) -> None:
                 openWorldHint=False,
             ),
         )
+        @project_scoped
         def save_scenario(
             name: str,
             content: Optional[str] = None,
             file_path: Optional[str] = None,
             rows: Optional[list[dict]] = None,
             tags: Optional[list[str]] = None,
+            project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
         ) -> str:
             """Save a named scenario for use in quality tests.
 
@@ -412,7 +438,12 @@ def register_tools(mcp: FastMCP) -> None:
                 tags: Optional list of tags for categorizing the scenario.
             """
             return _save_scenario_impl(
-                name, content=content, file_path=file_path, rows=rows, tags=tags
+                name,
+                content=content,
+                file_path=file_path,
+                rows=rows,
+                tags=tags,
+                project=project,
             )
 
     @mcp.tool(
@@ -424,7 +455,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def list_scenarios(limit: int = 20) -> str:
+    @project_scoped
+    def list_scenarios(limit: int = 20, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """List scenarios in the project, most recent first.
 
         Returns scenario names, IDs, tags, row counts, and creation dates.
@@ -440,7 +472,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -489,9 +521,11 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @project_scoped
     def get_scenario(
         name: Optional[str] = None,
         scenario_id: Optional[str] = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Read a scenario's metadata and all data rows.
 
@@ -511,7 +545,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -584,7 +618,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def create_scenario_version(base_name: str, rows: list[dict]) -> str:
+    @project_scoped
+    def create_scenario_version(base_name: str, rows: list[dict], project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Create a new version of an existing scenario with updated data.
 
         Automatically determines the next version number (e.g., 'my-test-v2',
@@ -605,7 +640,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -669,9 +704,11 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @project_scoped
     def preview_delete_scenario(
         name: Optional[str] = None,
         scenario_id: Optional[str] = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Preview what will be deleted before removing a scenario.
 
@@ -692,7 +729,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -759,7 +796,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def delete_scenario(scenario_id: str, name: str) -> str:
+    @project_scoped
+    def delete_scenario(scenario_id: str, name: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Permanently delete a scenario and all related test data.
 
         Both scenario_id and name are required. Use preview_delete_scenario first
@@ -775,6 +813,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
+            resolve_project(okareo, project)
         except Exception as e:
             return format_tool_error(e)
 
@@ -806,4 +845,166 @@ def register_tools(mcp: FastMCP) -> None:
             ),
         }, default=str)
 
+    @mcp.tool(
+        title="Move Scenario",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,  # relocates; deletes nothing
+            idempotentHint=False,  # a repeat real move 400s (already there)
+            openWorldHint=False,
+        ),
+    )
+    def move_scenario(
+        scenario: Annotated[
+            str,
+            Field(
+                description=(
+                    "The Scenario to move — its name (resolved within the source "
+                    "project) or its id."
+                )
+            ),
+        ],
+        to_project: Annotated[
+            str,
+            Field(description="Destination project — name or id."),
+        ],
+        dry_run: bool = True,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
+    ) -> str:
+        """Move a Scenario — and everything under it — to another project.
+
+        Moves are per Scenario, never per simulation: the Scenario, all of its
+        simulations, their datapoints, check results, and traces move together.
+        Targets never move — they are shared across the organization and stay
+        usable from every project. Monitors, dashboards, and notification
+        settings stay in the source project.
+
+        DRY-RUN-FIRST PROTOCOL: dry_run defaults to true and the first call
+        must keep it that way. Present the returned plan to the user — the
+        per-table counts and any blockers — and only after
+        the user explicitly confirms call this tool again with dry_run=false.
+        Never execute a move the user has not confirmed against those counts.
+
+        A blocked move (simulations still running, or a same-named Scenario in
+        the destination) returns the server's structured refusal. Do not retry
+        it unchanged: wait for the simulations to finish, or rename one of the
+        Scenarios.
+
+        Args:
+            scenario: The Scenario to move — name (within the source project) or id.
+            to_project: Destination project — name or id.
+            dry_run: True (default) reports what would move without writing.
+        """
+        from okareo_api_client.api.default import (
+            get_scenario_sets_v0_scenario_sets_get,
+        )
+
+        try:
+            okareo = get_okareo_client()
+        except Exception as e:
+            return format_tool_error(e)
+
+        with project_resolution_scope():
+            # Two projects, one confined scope (036 FR-018): the source by the
+            # standard precedence, the destination always explicitly — so a
+            # bad destination fails with the same available-projects error
+            # shape as everywhere else, never a fallback.
+            try:
+                source = resolve_project(okareo, project)
+                destination = resolve_project(okareo, to_project)
+            except Exception as e:
+                return format_tool_error(e)
+
+            # Resolve the Scenario within the SOURCE project.
+            scenario_id = None
+            try:
+                uuid.UUID(str(scenario))
+                scenario_id = str(scenario)
+            except ValueError:
+                try:
+                    rows = get_scenario_sets_v0_scenario_sets_get.sync(
+                        client=okareo.client,
+                        project_id=source.id,
+                        api_key=okareo.api_key,
+                    )
+                except Exception as e:
+                    return format_tool_error(e)
+                for row in rows or []:
+                    if _get_attr(row, "name") == scenario:
+                        scenario_id = _get_attr(row, "scenario_id")
+                        break
+                if scenario_id is None:
+                    return json.dumps({
+                        "error": (
+                            f"Scenario '{scenario}' not found in project "
+                            f"'{source.name}'. Use list_scenarios to see "
+                            "available scenarios."
+                        ),
+                    })
+
+            try:
+                plan = okareo_api_request(
+                    okareo,
+                    "post",
+                    f"/v0/scenario_sets/{scenario_id}/move",
+                    json={"destination_project_id": destination.id},
+                    params={"dry_run": "true"} if dry_run else None,
+                )
+            except httpx.HTTPStatusError as e:
+                return _move_refusal(e, source, destination)
+            except Exception as e:
+                return format_tool_error(e)
+
+        result = {
+            "executed": bool(plan.get("executed")) if isinstance(plan, dict) else False,
+            "plan": plan,
+            "source_project": source.as_dict(),
+            "destination_project": destination.as_dict(),
+        }
+        if dry_run:
+            result["next_step"] = (
+                "This was a dry run — nothing moved. Present these counts and "
+                "any blockers to the user, and call move_scenario again with "
+                "dry_run=false only after they explicitly confirm."
+            )
+        return json.dumps(result, default=str)
+
     return None
+
+
+def _move_refusal(error: httpx.HTTPStatusError, source, destination) -> str:
+    """Map a non-2xx move response to a structured, never-retried payload."""
+    status = error.response.status_code
+    try:
+        body = error.response.json()
+    except Exception:
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+
+    if status == 409 and isinstance(detail, dict):
+        return json.dumps({
+            "blocked": True,
+            "plan": detail,
+            "source_project": source.as_dict(),
+            "destination_project": destination.as_dict(),
+            "message": (
+                "The move is blocked; nothing moved. Options: wait for the "
+                "running simulations to finish, or rename the colliding "
+                "Scenario. Do not retry unchanged."
+            ),
+        }, default=str)
+    if status == 503:
+        return json.dumps({
+            "error": (
+                detail
+                if isinstance(detail, str)
+                else "The move timed out and was rolled back whole — nothing "
+                "moved. Ask the user before retrying."
+            ),
+            "retryable": True,
+        }, default=str)
+    return json.dumps({
+        "error": (
+            detail if isinstance(detail, str) else f"Move failed with HTTP {status}."
+        ),
+    }, default=str)

@@ -136,7 +136,7 @@ class TestProjectIdIsolationAcrossOrgs:
     def test_two_orgs_resolve_independent_project_ids(self, monkeypatch):
         from src.okareo_client import (
             _reset_for_tests as _reset_project_cache,
-            resolve_project_id,
+            resolve_project,
         )
 
         _reset_project_cache()
@@ -159,10 +159,80 @@ class TestProjectIdIsolationAcrossOrgs:
             project.name = "Global"
             project.id = project_id
             okareo.get_projects.return_value = [project]
-            return resolve_project_id(okareo)
+            return resolve_project(okareo).id
 
         resolved["A"] = _resolve("org-A", "proj-A")
         resolved["B"] = _resolve("org-B", "proj-B")
         assert resolved["A"] == "proj-A"
         assert resolved["B"] == "proj-B"
         assert resolved["A"] != resolved["B"]
+
+
+class TestProjectPinIsolation:
+    """036-project-scoping / research R3.
+
+    In HTTP mode one process serves every tenant, so a pin must travel per
+    connection. The failure this guards against is a pin set by one caller
+    leaking into another caller's request.
+    """
+
+    def test_env_var_pin_is_ignored_in_http_mode(self, monkeypatch):
+        """The whole hazard in one assertion: OKAREO_PROJECT is process-wide."""
+        from src.okareo_client import _read_connection_pin
+
+        monkeypatch.setenv("TRANSPORT", "streamable-http")
+        monkeypatch.setenv("OKAREO_PROJECT", "Tenant-A-Project")
+        assert _read_connection_pin() is None
+
+    def test_pin_is_read_per_request_not_cached(self, monkeypatch):
+        from unittest.mock import MagicMock, patch
+
+        import src.okareo_client as mod
+
+        monkeypatch.setenv("TRANSPORT", "streamable-http")
+
+        def _pin_for(value):
+            request = MagicMock()
+            request.query_params = {"project": value} if value else {}
+            request.headers = {}
+            ctx = MagicMock()
+            ctx.request_context.request = request
+            with patch("mcp.server.lowlevel.server.request_ctx") as rc:
+                rc.get.return_value = ctx
+                return mod._read_connection_pin()
+
+        assert _pin_for("Tenant-A-Project") == "Tenant-A-Project"
+        assert _pin_for("Tenant-B-Project") == "Tenant-B-Project"
+        assert _pin_for(None) is None
+
+    def test_project_cache_is_keyed_per_organization(self, monkeypatch):
+        """A pinned project resolved for org A must not be served to org B."""
+        from unittest.mock import MagicMock
+
+        from src.okareo_client import _reset_for_tests, resolve_project
+
+        monkeypatch.delenv("TRANSPORT", raising=False)
+        monkeypatch.setenv("OKAREO_PROJECT", "Shared Name")
+        _reset_for_tests()
+
+        def _resolve(org_id, project_id):
+            set_session_credential(
+                SessionCredential(
+                    kind="oauth",
+                    api_key=f"jwt-{org_id}",
+                    org_id=org_id,
+                    subject="user-1",
+                )
+            )
+            okareo = MagicMock()
+            okareo.api_key = f"jwt-{org_id}"
+            project = MagicMock()
+            project.id = project_id
+            project.name = "Shared Name"
+            okareo.get_projects.return_value = [project]
+            return resolve_project(okareo).id
+
+        a = _resolve("org-A", "11111111-1111-4111-8111-111111111111")
+        b = _resolve("org-B", "22222222-2222-4222-8222-222222222222")
+        assert a != b, "same project name in two orgs must resolve separately"
+        _reset_for_tests()

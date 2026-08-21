@@ -5,7 +5,7 @@ Provides nine MCP tools for the multi-turn simulation workflow:
 - create_or_update_target: Create or update a Target (Generation, Custom Endpoint, or Voice)
     by name (upsert). Supports optional auth_params for custom_endpoint targets.
 - get_target: Retrieve a Target's configuration by name (all types)
-- list_targets: List all simulation targets (voice and custom_endpoint) in the project
+- list_targets: List the organization's simulation targets (voice and custom_endpoint) — targets are org-shared
 - delete_target: Remove a simulation target and all its related test data
 - create_or_update_driver: Create or update a Driver persona by name (upsert)
 - get_driver: Retrieve a Driver's configuration by name
@@ -17,18 +17,24 @@ Provides nine MCP tools for the multi-turn simulation workflow:
 import json
 import os
 import re
-from typing import Optional
+from typing import Annotated, Optional
 
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import Field
 from mcp.types import ToolAnnotations
 
 from src.analytics_context import annotate
-from src.error_handling import format_tool_error
+from src.error_handling import ArtifactNotInProject, format_tool_error
 from src.okareo_client import (
+    PROJECT_PARAM_DESC,
     find_test_runs,
     get_okareo_client,
     okareo_api_request,
-    resolve_project_id,
+    organization_scoped,
+    project_resolution_scope,
+    project_scoped,
+    resolve_artifact_by_name,
+    resolve_project,
 )
 
 
@@ -95,14 +101,20 @@ def _fetch_targets(okareo, project_id) -> list[dict]:
     return targets
 
 
-def _fetch_drivers(okareo, project_id) -> list[dict]:
-    """Return ``[{id, name}]`` for Drivers, ``[]`` if unavailable."""
+def _fetch_drivers(okareo) -> list[dict]:
+    """Return ``[{id, name}]`` for Drivers, ``[]`` if unavailable.
+
+    Deliberately UNFILTERED by project. Drivers are organization-shared
+    (FR-027): the endpoint does accept and apply a ``project_id`` filter, but
+    passing it would return only drivers *authored in* the acting project,
+    silently partitioning a library that is shared — which reads as data loss,
+    not as a scoping decision (research R6).
+    """
     from okareo_api_client.api.default import get_all_drivers_v0_drivers_get
 
     try:
         drivers = get_all_drivers_v0_drivers_get.sync(
             client=okareo.client,
-            project_id=project_id,
             api_key=okareo.api_key,
         )
     except Exception:
@@ -557,6 +569,11 @@ def _build_handoff_response(
     return response
 
 
+_SHARED_NOTE = (
+    "Drivers are shared across every project in your organization, not private to the project you are working in."
+)
+
+
 def register_tools(mcp: FastMCP) -> None:
     """Register all simulation tools with the FastMCP server."""
 
@@ -569,6 +586,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @project_scoped
     def create_or_update_target(
         name: str,
         type: str,
@@ -598,6 +616,7 @@ def register_tools(mcp: FastMCP) -> None:
         sip_uri: Optional[str] = None,
         sip_username: Optional[str] = None,
         sip_password: Optional[str] = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Create or update a Target — the AI system you want to evaluate in a simulation.
 
@@ -930,11 +949,36 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
         try:
-            target = Target(name=name, target=target_impl)
+            target_payload = target_impl
+            if type == "voice" and edge_type == "twilio":
+                # Managed Twilio only: drop credential keys the caller never
+                # supplied. TwilioVoiceTarget.params() always emits
+                # account_sid, auth_token and from_phone_number and defaults
+                # the first two to "", so an omitted credential is persisted
+                # as a blank string instead of being left absent. Target
+                # accepts a plain dict and create_or_update_target uses it
+                # verbatim, so this is the only way to control the shape.
+                # Scoped to this branch deliberately: other target types go
+                # through the object path, which the SDK inspects to register
+                # custom model invokers.
+                params = target_impl.params()
+                for key, supplied in (
+                    ("account_sid", account_sid),
+                    ("auth_token", auth_token),
+                    ("from_phone_number", from_phone_number),
+                ):
+                    if not supplied and not params.get(key):
+                        params.pop(key, None)
+                target_payload = {
+                    k: v for k, v in params.items() if v is not None
+                }
+
+            target = Target(name=name, target=target_payload)
             create_kwargs = {}
             if type == "voice" and edge_type == "twilio":
                 create_kwargs["sensitive_fields"] = TWILIO_SENSITIVE_FIELDS
@@ -944,7 +988,11 @@ def register_tools(mcp: FastMCP) -> None:
                 create_kwargs["sensitive_fields"] = _build_custom_endpoint_sensitive_fields(
                     auth_params, sensitive_fields
                 )
-            result = okareo.create_or_update_target(target, **create_kwargs)
+            # FR-001c: pass the resolved project explicitly on every change,
+            # rather than relying on the client-level default.
+            result = okareo.create_or_update_target(
+                target, project_id=project_id, **create_kwargs
+            )
         except Exception as e:
             return format_tool_error(e)
 
@@ -972,7 +1020,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def get_target(name: str) -> str:
+    @project_scoped
+    def get_target(name: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Check the current configuration of a test target.
 
         Retrieves a Target by name. Works for all target types (Generation,
@@ -1005,7 +1054,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -1121,13 +1170,17 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def list_targets() -> str:
-        """Browse all simulation targets available in this project.
+    @project_scoped
+    def list_targets(
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
+    ) -> str:
+        """Browse the organization's simulation targets.
 
-        Returns all simulation targets (voice and custom_endpoint types)
-        created via create_or_update_target. Does not include generation models
-        registered via register_generation_model — use list_generation_models
-        for those.
+        Targets are shared across the organization (like checks and drivers):
+        this lists every simulation target (voice and custom_endpoint types)
+        created via create_or_update_target, whatever project you work in.
+        Does not include generation models registered via
+        register_generation_model — use list_generation_models for those.
         """
         from okareo_api_client.api.default import (
             get_all_models_under_test_v0_models_under_test_get,
@@ -1136,7 +1189,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -1210,7 +1263,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def delete_target(name: str) -> str:
+    @project_scoped
+    def delete_target(name: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Remove a simulation target and all its related test data.
 
         Permanently deletes the target and cascades to associated
@@ -1225,13 +1279,18 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
         # Look up target by name to get ID
         try:
-            mut = okareo.get_model(name=name)
-            mut_id = _get_attr(mut, "mut_id", "")
+            mut = resolve_artifact_by_name(okareo, name, project_id, kind="target")
+            mut_id = _get_attr(mut, "id", "")
+        except ArtifactNotInProject as e:
+            # FR-030: keep the structured outcome — it names the
+            # project searched and what is available there.
+            return format_tool_error(e)
         except Exception:
             return json.dumps({
                 "error": f"Target '{name}' not found. "
@@ -1272,6 +1331,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @organization_scoped(_SHARED_NOTE)
     def create_or_update_driver(
         name: str,
         prompt_template: str,
@@ -1341,11 +1401,17 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
+        # Authorship provenance only — drivers are organization-shared, so a
+        # failure to resolve must not block creation (FR-027, FR-028). Scoped
+        # so this resolution never leaks into a later response: a driver is
+        # not a project-scoped artifact and must not report a project
+        # (FR-018).
         project_id = None
-        try:
-            project_id = resolve_project_id(okareo)
-        except Exception:
-            pass
+        with project_resolution_scope():
+            try:
+                project_id = resolve_project(okareo).id
+            except Exception:
+                pass
 
         # Validate voice / voice_profile against the catalog so a typo is
         # caught here rather than producing an unusable driver (FR-032). The
@@ -1492,6 +1558,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @organization_scoped(_SHARED_NOTE)
     def get_driver(name: str) -> str:
         """Retrieve a driver persona you've already configured.
 
@@ -1549,10 +1616,13 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @organization_scoped(_SHARED_NOTE)
     def list_drivers() -> str:
-        """See what driver personas are available in this project.
+        """See what driver personas are available in your organization.
 
         Returns all Drivers with their names, IDs, model, and temperature.
+        Drivers are shared across every project, so this listing does not
+        resolve or filter by project (FR-027).
         """
         from okareo_api_client.api.default import (
             get_all_drivers_v0_drivers_get,
@@ -1560,14 +1630,13 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
         except Exception as e:
             return format_tool_error(e)
 
         try:
+            # Unfiltered by project: drivers are organization-shared (FR-027).
             drivers = get_all_drivers_v0_drivers_get.sync(
                 client=okareo.client,
-                project_id=project_id,
                 api_key=okareo.api_key,
             )
         except Exception as e:
@@ -1577,7 +1646,7 @@ def register_tools(mcp: FastMCP) -> None:
             return json.dumps({
                 "drivers": [],
                 "count": 0,
-                "message": "No drivers found in project.",
+                "message": "No drivers found in this organization.",
             })
 
         result = []
@@ -1665,6 +1734,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
+    @project_scoped
     def run_simulation(
         name: str,
         scenario_name: Optional[str] = None,
@@ -1681,6 +1751,7 @@ def register_tools(mcp: FastMCP) -> None:
         checks_at_every_turn: Optional[bool] = None,
         stop_check: Optional[dict] = None,
         ctx: Context = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Run a multi-turn conversation evaluation of your AI agent.
 
@@ -1786,6 +1857,7 @@ def register_tools(mcp: FastMCP) -> None:
         from okareo_api_client.errors import UnexpectedStatus
         from okareo_api_client.models.general_find_payload import GeneralFindPayload
 
+        from okareo.model_under_test import Simulation
         from src.voice_augmentation import (
             AugmentedSimulation,
             validate_augmentation,
@@ -1825,7 +1897,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -1952,7 +2024,7 @@ def register_tools(mcp: FastMCP) -> None:
                         else _get_attr(original, "driver_id")
                     )
                     if orig_driver_id:
-                        for d in _fetch_drivers(okareo, project_id):
+                        for d in _fetch_drivers(okareo):
                             if d["id"] == str(orig_driver_id):
                                 resolved_driver_name = d["name"]
                                 break
@@ -2061,24 +2133,56 @@ def register_tools(mcp: FastMCP) -> None:
             augmentation is not None or silence_timeout_ms is not None
         )
 
-        if use_augmented_path:
-            # Resolve the target to determine its type for voice preflight.
-            try:
-                target_model = okareo.get_target_by_name(resolved_target_name)
-            except Exception as e:
-                return format_tool_error(e, key_registry)
-            if target_model is None or not getattr(target_model, "target", None):
-                return json.dumps({
-                    "error": (
-                        f"Target '{resolved_target_name}' not found. "
-                        "Use create_or_update_target to create it first."
-                    ),
-                })
-            target_dict = target_model.target
-            if not isinstance(target_dict, dict):
-                target_dict = _serialize_value(target_dict) or {}
-            target_type = target_dict.get("type") if isinstance(target_dict, dict) else None
+        # Resolve the target INSIDE the acting project (FR-001a, research
+        # R13). Both submission paths below build the run themselves rather
+        # than handing okareo.run_simulation a target name: the SDK resolves a
+        # name through get_target_by_name, which takes no project, so a target
+        # living only in a non-Global project comes back 404 even though
+        # list_targets has just shown it. Passing a Target object instead is
+        # not an option either — the SDK routes that through
+        # create_or_update_target, which would rewrite the user's target (and
+        # clear its tags and sensitive_fields) on every run.
+        try:
+            target_model = resolve_artifact_by_name(
+                okareo, resolved_target_name, project_id, kind="target"
+            )
+        except Exception as e:
+            return format_tool_error(e, key_registry)
 
+        # The listing returns `models` as a generated container whose VALUES
+        # are generated objects, not plain dicts — so each one has to be
+        # serialized in turn. _fetch_targets only ever reads .keys(), which is
+        # why list_targets shows a target that this path could not read.
+        models_dict = _serialize_value(_get_attr(target_model, "models")) or {}
+        if not isinstance(models_dict, dict):
+            models_dict = {}
+
+        target_dict: dict = {}
+        target_type = None
+        # The KEY is the target type; the config itself may not carry one.
+        for key in ("voice", "custom_endpoint", *models_dict.keys()):
+            if key not in models_dict:
+                continue
+            candidate = models_dict[key]
+            if not isinstance(candidate, dict):
+                candidate = _serialize_value(candidate) or {}
+            if isinstance(candidate, dict) and candidate:
+                target_dict = dict(candidate)
+                target_type = target_dict.get("type") or key
+                target_dict.setdefault("type", target_type)
+                break
+
+        if not target_dict:
+            return json.dumps({
+                "error": (
+                    f"Target '{resolved_target_name}' returned no usable "
+                    "configuration from Okareo. Check it in the Okareo web "
+                    "application — re-creating it here may not help."
+                ),
+                "target_name": resolved_target_name,
+            })
+
+        if True:
             # Voice-target preflight (FR-025).
             if augmentation is not None and target_type != "voice":
                 return json.dumps({
@@ -2112,14 +2216,22 @@ def register_tools(mcp: FastMCP) -> None:
                 sim_extras["checks_at_every_turn"] = checks_at_every_turn
             if stop_check is not None:
                 sim_extras["stop_check"] = stop_check
-            sim_params = AugmentedSimulation(
-                repeats=repeats,
-                max_turns=max_turns,
-                first_turn=first_turn,
-                augmentation=augmentation,
-                silence_timeout_ms=silence_timeout_ms,
-                **sim_extras,
-            )
+            if use_augmented_path:
+                sim_params = AugmentedSimulation(
+                    repeats=repeats,
+                    max_turns=max_turns,
+                    first_turn=first_turn,
+                    augmentation=augmentation,
+                    silence_timeout_ms=silence_timeout_ms,
+                    **sim_extras,
+                )
+            else:
+                sim_params = Simulation(
+                    repeats=repeats,
+                    max_turns=max_turns,
+                    first_turn=first_turn,
+                    **sim_extras,
+                )
 
             # Build the dummy ModelUnderTest exactly as okareo.run_simulation
             # does internally (see SDK okareo.py:1455-1487).
@@ -2132,17 +2244,22 @@ def register_tools(mcp: FastMCP) -> None:
                 )
                 from okareo_api_client.models.test_run_type import TestRunType
 
-                target_id_raw = target_model.id
-                if isinstance(target_id_raw, str):
-                    target_uuid = UUID(target_id_raw)
-                elif target_id_raw:
-                    target_uuid = target_id_raw
-                else:
-                    target_uuid = UUID(int=0)
-                project_uuid = (
-                    UUID(project_id) if isinstance(project_id, str)
-                    else (project_id if project_id else UUID(int=0))
-                )
+                def _as_uuid(value):
+                    """Coerce an id to a UUID, tolerating anything that is not
+                    one. The dummy MUT below only needs a well-formed value;
+                    failing the whole run with 'badly formed hexadecimal UUID
+                    string' would tell the user nothing about what to fix."""
+                    if isinstance(value, UUID):
+                        return value
+                    if value:
+                        try:
+                            return UUID(str(value))
+                        except (ValueError, AttributeError, TypeError):
+                            return UUID(int=0)
+                    return UUID(int=0)
+
+                target_uuid = _as_uuid(_get_attr(target_model, "id"))
+                project_uuid = _as_uuid(project_id)
                 dummy_response = ModelUnderTestResponse(
                     id=target_uuid,
                     project_id=project_uuid,
@@ -2181,49 +2298,6 @@ def register_tools(mcp: FastMCP) -> None:
             except Exception as e:
                 return format_tool_error(e, key_registry)
             is_voice = target_type == "voice"
-        else:
-            # Non-augmented path: use the SDK's high-level helper. Forward any
-            # peer simulation_params knobs (US8 — FR-015) that the SDK's
-            # Simulation dataclass natively supports.
-            try:
-                sim_kwargs = dict(
-                    name=name,
-                    scenario=resolved_scenario,
-                    target=resolved_target_name,
-                    driver=resolved_driver_name,
-                    checks=checks or [],
-                    repeats=repeats,
-                    max_turns=max_turns,
-                    first_turn=first_turn,
-                )
-                if turn_transition_time is not None:
-                    sim_kwargs["turn_transition_time"] = turn_transition_time
-                if checks_at_every_turn is not None:
-                    sim_kwargs["checks_at_every_turn"] = checks_at_every_turn
-                if stop_check is not None:
-                    sim_kwargs["stop_check"] = stop_check
-                if key_registry:
-                    sim_kwargs["api_keys"] = key_registry
-                # submit=False -> okareo.run_simulation uses mut.run_test, which
-                # runs the simulation synchronously (blocks until the backend
-                # marks the run complete) instead of the async submit_test path.
-                sim_kwargs["submit"] = False
-
-                def submit_thunk(_kwargs=sim_kwargs):
-                    return okareo.run_simulation(**_kwargs)
-            except Exception as e:
-                return format_tool_error(e, key_registry)
-
-            # Best-effort target type for the runtime estimate (voice vs text).
-            is_voice = False
-            try:
-                _tobj = okareo.get_target_by_name(resolved_target_name)
-                _td = _get_attr(_tobj, "target")
-                if not isinstance(_td, dict):
-                    _td = _serialize_value(_td) or {}
-                is_voice = isinstance(_td, dict) and _td.get("type") == "voice"
-            except Exception:
-                is_voice = False
 
         # --- Faux-async handoff (spec 025): run the blocking submission in a
         # background thread, discover the run id, and return within the buffer
@@ -2303,11 +2377,13 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @project_scoped
     def list_simulations(
         target_name: Optional[str] = None,
         scenario_name: Optional[str] = None,
         limit: int = 10,
         detail_level: str = "summary",
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """List past simulation runs in the project.
 
@@ -2353,7 +2429,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -2376,8 +2452,14 @@ def register_tools(mcp: FastMCP) -> None:
         # Resolve target_name to mut_id if provided
         if target_name is not None:
             try:
-                mut = okareo.get_model(name=target_name)
-                payload_kwargs["mut_id"] = mut.mut_id
+                mut = resolve_artifact_by_name(
+                    okareo, target_name, project_id, kind="target"
+                )
+                payload_kwargs["mut_id"] = _get_attr(mut, "id", "")
+            except ArtifactNotInProject as e:
+                # FR-030: keep the structured outcome — it names the
+                # project searched and what is available there.
+                return format_tool_error(e)
             except Exception:
                 return json.dumps({
                     "error": f"Target '{target_name}' not found. "

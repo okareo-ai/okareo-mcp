@@ -10,18 +10,25 @@ Provides five MCP tools for the core test execution workflow:
 """
 
 import json
-from typing import Optional
+from typing import Annotated, Optional
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import Field
+
 from okareo_api_client.errors import UnexpectedStatus
 
 from src.analytics_context import annotate
-from src.error_handling import format_tool_error
+from src.error_handling import ArtifactNotInProject, format_tool_error
 from src.okareo_client import (
+    organization_scoped,
     find_test_runs,
+    PROJECT_PARAM_DESC,
     get_okareo_client,
-    resolve_project_id,
+    resolve_artifact_by_name,
+    project_scoped,
+
+    resolve_project,
 )
 
 # Test-run statuses that block re-evaluation — the run has not produced a
@@ -187,6 +194,11 @@ def _derive_run_check_ids(okareo, run_id, name_to_id: dict) -> list:
     return [name_to_id[n] for n in check_names if n in name_to_id]
 
 
+_SHARED_NOTE = (
+    "Checks are shared across every project in your organization, not private to the project you are working in."
+)
+
+
 def register_tools(mcp: FastMCP) -> None:
     """Register all test run tools with the FastMCP server."""
 
@@ -199,6 +211,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @organization_scoped(_SHARED_NOTE)
     def list_checks(limit: int = 20, all_versions: bool = False) -> str:
         """List available quality checks, grouped by category.
 
@@ -290,6 +303,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
+    @project_scoped
     def run_test(
         scenario_name: str,
         model_name: str,
@@ -297,6 +311,7 @@ def register_tools(mcp: FastMCP) -> None:
         name: Optional[str] = None,
         type: str = "NL_GENERATION",
         ctx: Context = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Submit a quality test that evaluates a model against a scenario using checks.
 
@@ -327,7 +342,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -356,7 +371,27 @@ def register_tools(mcp: FastMCP) -> None:
 
         # Look up MUT by name
         try:
-            mut = okareo.get_model(name=model_name)
+            from okareo.model_under_test import ModelUnderTest
+
+            # Resolve inside the acting project, then build the client object
+            # from that record — okareo.get_model() resolves the name with no
+            # project and cannot see a model outside the default one (R13).
+            _resp = resolve_artifact_by_name(
+                okareo, model_name, project_id, kind="model"
+            )
+            _models = _get_attr(_resp, "models") or {}
+            if not isinstance(_models, dict):
+                _models = {}
+            mut = ModelUnderTest(
+                client=okareo.client,
+                api_key=okareo.api_key,
+                mut=_resp,
+                models=_models,
+            )
+        except ArtifactNotInProject as e:
+            # FR-030: keep the structured outcome — it names the
+            # project searched and what is available there.
+            return format_tool_error(e)
         except Exception:
             return json.dumps({
                 "error": f"Model '{model_name}' not found. "
@@ -452,11 +487,13 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @project_scoped
     def list_test_runs(
         model_name: Optional[str] = None,
         scenario_name: Optional[str] = None,
         limit: int = 10,
         simulation_only: bool = False,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """List past test runs in the project.
 
@@ -485,7 +522,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -512,8 +549,14 @@ def register_tools(mcp: FastMCP) -> None:
         # Resolve model_name to mut_id if provided
         if model_name is not None:
             try:
-                mut = okareo.get_model(name=model_name)
-                payload_kwargs["mut_id"] = mut.mut_id
+                mut = resolve_artifact_by_name(
+                    okareo, model_name, project_id, kind="model"
+                )
+                payload_kwargs["mut_id"] = _get_attr(mut, "id", "")
+            except ArtifactNotInProject as e:
+                # FR-030: keep the structured outcome — it names the
+                # project searched and what is available there.
+                return format_tool_error(e)
             except Exception:
                 return json.dumps({
                     "error": f"Model '{model_name}' not found. "
@@ -618,12 +661,14 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @project_scoped
     def get_test_run_results(
         test_run_id: Optional[str] = None,
         name: Optional[str] = None,
         include_transcripts: bool = False,
         limit: int = 0,
         offset: int = 0,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Load the results of a specific test run.
 
@@ -661,7 +706,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -674,12 +719,21 @@ def register_tools(mcp: FastMCP) -> None:
         resolved_id = test_run_id
         run_metadata = None
 
-        # If looking up by name, resolve to most recent test run
+        # If looking up by name, resolve to most recent test run.
+        #
+        # No `id` to filter on -- the name is matched client-side, so this pulls
+        # every run in the project and is the one unbounded find_test_runs call
+        # left in this tool. Requesting row-level metrics here would attach a
+        # written explanation per check per row to all of them and 500 on a large
+        # project, exactly as the list tools did before #67. Nothing downstream
+        # needs them: _build_scenario_index_map reads scores_by_row, but those
+        # rows carry no test_id, so it already returns {} for every run the API
+        # returns and _scenario_index_map falls back to positional indexing.
         if not test_run_id and name:
             try:
                 payload = GeneralFindPayload(
                     project_id=project_id,
-                    return_model_metrics=True,
+                    return_model_metrics=False,
                 )
                 runs = find_test_runs(okareo, payload)
             except UnexpectedStatus as e:
@@ -886,10 +940,12 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @project_scoped
     def get_conversation_transcript(
         test_run_id: str,
         scenario_index: Optional[int] = None,
         test_id: Optional[str] = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Retrieve the full conversation transcript for a single data point.
 
@@ -939,7 +995,7 @@ def register_tools(mcp: FastMCP) -> None:
             from okareo_api_client.models.general_find_payload import (
                 GeneralFindPayload,
             )
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
             annotate(project_id=project_id)
             payload = GeneralFindPayload(
                 id=test_run_id,
@@ -1051,9 +1107,11 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
+    @project_scoped
     def reevaluate_test_run(
         test_run_id: str,
         checks: Optional[list[str]] = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Re-score a completed test run against a set of checks.
 
@@ -1072,7 +1130,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 

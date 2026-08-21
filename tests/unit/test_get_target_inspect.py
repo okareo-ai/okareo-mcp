@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.target_redaction import REDACTION_SENTINEL
+from src.okareo_client import ResolvedProject
 
 
 def _register_and_get_tools():
@@ -38,7 +39,7 @@ def api_key(monkeypatch):
 # US2 — Inspect a Target's auth endpoint
 # ---------------------------------------------------------------------------
 
-@patch("src.tools.simulations.resolve_project_id")
+@patch("src.tools.simulations.resolve_project")
 @patch("src.tools.simulations.get_okareo_client")
 def test_auth_endpoint_url_method_and_response_path_are_visible(
     mock_client, mock_project, tools
@@ -48,7 +49,7 @@ def test_auth_endpoint_url_method_and_response_path_are_visible(
     body keys) without consulting any external source.
     """
     mock_client.return_value = MagicMock()
-    mock_project.return_value = "proj-123"
+    mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
     mut = {
         "id": "mut-1",
@@ -89,14 +90,14 @@ def test_auth_endpoint_url_method_and_response_path_are_visible(
     assert set(auth["body"].keys()) == {"grant_type", "client_id"}
 
 
-@patch("src.tools.simulations.resolve_project_id")
+@patch("src.tools.simulations.resolve_project")
 @patch("src.tools.simulations.get_okareo_client")
 def test_sensitive_fields_paths_show_sentinel(mock_client, mock_project, tools):
     """Every path in the Target's sensitive_fields list comes back with
     its value replaced by the redaction sentinel (FR-003, FR-004).
     """
     mock_client.return_value = MagicMock()
-    mock_project.return_value = "proj-123"
+    mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
     mut = {
         "id": "mut-2",
@@ -139,7 +140,7 @@ def test_sensitive_fields_paths_show_sentinel(mock_client, mock_project, tools):
 # US3 — Streaming is per-endpoint, not Target-wide
 # ---------------------------------------------------------------------------
 
-@patch("src.tools.simulations.resolve_project_id")
+@patch("src.tools.simulations.resolve_project")
 @patch("src.tools.simulations.get_okareo_client")
 def test_streaming_lives_inside_next_message_params_only(
     mock_client, mock_project, tools
@@ -149,7 +150,7 @@ def test_streaming_lives_inside_next_message_params_only(
     top-level Target field (FR-007).
     """
     mock_client.return_value = MagicMock()
-    mock_project.return_value = "proj-123"
+    mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
     mut = {
         "id": "mut-3",

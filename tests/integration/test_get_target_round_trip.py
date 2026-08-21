@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from src.target_redaction import REDACTION_SENTINEL
+from src.okareo_client import ResolvedProject
 
 
 # ---------------------------------------------------------------------------
@@ -79,13 +80,13 @@ SAMPLE_MUT = {
 # get_target shape — Phase 3 US1 acceptance scenarios 1–4
 # ---------------------------------------------------------------------------
 
-@patch("src.tools.simulations.resolve_project_id")
+@patch("src.tools.simulations.resolve_project")
 @patch("src.tools.simulations.get_okareo_client")
 def test_get_target_returns_flat_envelope_for_custom_endpoint(
     mock_client, mock_project, tools
 ):
     mock_client.return_value = MagicMock()
-    mock_project.return_value = "proj-123"
+    mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
     with patch(
         "okareo_api_client.api.default.get_all_models_under_test_v0_models_under_test_get.sync",
@@ -133,12 +134,12 @@ def test_get_target_returns_flat_envelope_for_custom_endpoint(
     ]
 
 
-@patch("src.tools.simulations.resolve_project_id")
+@patch("src.tools.simulations.resolve_project")
 @patch("src.tools.simulations.get_okareo_client")
 def test_get_target_omits_auth_params_when_absent(mock_client, mock_project, tools):
     """A Target with no auth_params returns no auth_params key (not null, not {})."""
     mock_client.return_value = MagicMock()
-    mock_project.return_value = "proj-123"
+    mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
     mut = {
         "id": "mut-no-auth",
@@ -161,12 +162,12 @@ def test_get_target_omits_auth_params_when_absent(mock_client, mock_project, too
     assert "max_parallel_requests" not in response
 
 
-@patch("src.tools.simulations.resolve_project_id")
+@patch("src.tools.simulations.resolve_project")
 @patch("src.tools.simulations.get_okareo_client")
 def test_get_target_generation_shape_unchanged(mock_client, mock_project, tools):
     """Generation Targets keep today's response shape (FR-013)."""
     mock_client.return_value = MagicMock()
-    mock_project.return_value = "proj-123"
+    mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
     mut = {
         "id": "mut-gen",
@@ -225,7 +226,7 @@ def test_create_rejects_unsubstituted_sentinel(mock_client, tools):
 # Full round-trip — Phase 3 US1 acceptance 5 (positive)
 # ---------------------------------------------------------------------------
 
-@patch("src.tools.simulations.resolve_project_id")
+@patch("src.tools.simulations.resolve_project")
 @patch("src.tools.simulations.get_okareo_client")
 def test_round_trip_clone_succeeds_after_substitution(
     mock_client, mock_project, tools
@@ -237,7 +238,7 @@ def test_round_trip_clone_succeeds_after_substitution(
     mock_result.name = "staging-chatbot"
     mock_okareo.create_or_update_target.return_value = mock_result
     mock_client.return_value = mock_okareo
-    mock_project.return_value = "proj-123"
+    mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
     # Step 1: get_target
     with patch(

@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from src.error_handling import format_tool_error
+from src.okareo_client import organization_scoped
 from src.okareo_client import get_okareo_client
 
 
@@ -80,6 +81,11 @@ def _check_tags(obj):
     return []
 
 
+_SHARED_NOTE = (
+    "Checks are shared across every project in your organization, not private to the project you are working in."
+)
+
+
 def register_tools(mcp: FastMCP) -> None:
     """Register all check management tools with the FastMCP server."""
 
@@ -92,6 +98,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @organization_scoped(_SHARED_NOTE)
     def create_or_update_check(
         name: str,
         description: str,
@@ -307,6 +314,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
+    @organization_scoped(_SHARED_NOTE)
     def generate_check(
         name: str,
         description: str,
@@ -440,6 +448,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @organization_scoped(_SHARED_NOTE)
     def get_check(name: str, version: Optional[int] = None) -> str:
         """Retrieve the full configuration of a check by name, including its prompt template or code contents.
 
@@ -511,6 +520,7 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
+    @organization_scoped(_SHARED_NOTE)
     def delete_check(name: str) -> str:
         """Permanently delete a check by name.
 

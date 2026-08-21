@@ -12,6 +12,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from src.okareo_client import ResolvedProject
 
 
 # ---------------------------------------------------------------------------
@@ -133,13 +134,12 @@ class TestEachStrategy:
         ],
     )
     @patch("okareo.model_under_test.ModelUnderTest")
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_strategy_reaches_run_test(
         self, mock_client, mock_project, mock_mut_class, strategy_name,
-        strategy_config, tools, mock_get_scenario_sets,
-    ):
-        mock_project.return_value = "00000000-0000-0000-0000-000000000111"
+        strategy_config, tools, mock_get_scenario_sets, sim_submission,):
+        mock_project.return_value = ResolvedProject(id="00000000-0000-0000-0000-000000000111", name="Global", basis="default")
         okareo, mut_instance = _mock_okareo_for_augmented_path()
         mock_client.return_value = okareo
         mock_mut_class.return_value = mut_instance
@@ -175,12 +175,11 @@ class TestEachStrategy:
 
 class TestComposition:
     @patch("okareo.model_under_test.ModelUnderTest")
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_noise_plus_barge_in_succeeds(
-        self, mock_client, mock_project, mock_mut_class, tools, mock_get_scenario_sets,
-    ):
-        mock_project.return_value = "00000000-0000-0000-0000-000000000111"
+        self, mock_client, mock_project, mock_mut_class, tools, mock_get_scenario_sets, sim_submission,):
+        mock_project.return_value = ResolvedProject(id="00000000-0000-0000-0000-000000000111", name="Global", basis="default")
         okareo, mut_instance = _mock_okareo_for_augmented_path()
         mock_client.return_value = okareo
         mock_mut_class.return_value = mut_instance
@@ -239,12 +238,11 @@ class TestComposition:
 
 class TestVoiceTargetPreflight:
     @patch("okareo.model_under_test.ModelUnderTest")
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_augmentation_on_non_voice_target_rejected(
-        self, mock_client, mock_project, mock_mut_class, tools, mock_get_scenario_sets,
-    ):
-        mock_project.return_value = "00000000-0000-0000-0000-000000000111"
+        self, mock_client, mock_project, mock_mut_class, tools, mock_get_scenario_sets, sim_submission,):
+        mock_project.return_value = ResolvedProject(id="00000000-0000-0000-0000-000000000111", name="Global", basis="default")
         okareo, mut_instance = _mock_okareo_for_augmented_path(
             target=_make_custom_endpoint_target()
         )
@@ -327,12 +325,11 @@ class TestRangePreflight:
 
 class TestPeerKnobs:
     @patch("okareo.model_under_test.ModelUnderTest")
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_silence_timeout_ms_reaches_augmented_payload(
-        self, mock_client, mock_project, mock_mut_class, tools, mock_get_scenario_sets,
-    ):
-        mock_project.return_value = "00000000-0000-0000-0000-000000000111"
+        self, mock_client, mock_project, mock_mut_class, tools, mock_get_scenario_sets, sim_submission,):
+        mock_project.return_value = ResolvedProject(id="00000000-0000-0000-0000-000000000111", name="Global", basis="default")
         okareo, mut_instance = _mock_okareo_for_augmented_path()
         mock_client.return_value = okareo
         mock_mut_class.return_value = mut_instance
@@ -351,15 +348,14 @@ class TestPeerKnobs:
             "simulation_params"].to_dict()
         assert emitted["silence_timeout_ms"] == 8000
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_turn_transition_time_threaded_through_non_augmented_path(
-        self, mock_client, mock_project, tools, mock_get_scenario_sets,
-    ):
+        self, mock_client, mock_project, tools, mock_get_scenario_sets, sim_submission,):
         """turn_transition_time without augmentation goes through the SDK's
         run_simulation helper (the non-bypass path).
         """
-        mock_project.return_value = "00000000-0000-0000-0000-000000000111"
+        mock_project.return_value = ResolvedProject(id="00000000-0000-0000-0000-000000000111", name="Global", basis="default")
         okareo = MagicMock()
         okareo.run_simulation.return_value = MagicMock(
             id="run-1", name="x", app_link="link"
@@ -375,15 +371,14 @@ class TestPeerKnobs:
         ))
 
         assert "error" not in result, result
-        okareo.run_simulation.assert_called_once()
-        assert okareo.run_simulation.call_args.kwargs["turn_transition_time"] == 2500
+        sim_submission.assert_called_once()
+        assert sim_submission.call_args.kwargs["simulation_params"].turn_transition_time == 2500
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_checks_at_every_turn_threaded_through_non_augmented_path(
-        self, mock_client, mock_project, tools, mock_get_scenario_sets,
-    ):
-        mock_project.return_value = "00000000-0000-0000-0000-000000000111"
+        self, mock_client, mock_project, tools, mock_get_scenario_sets, sim_submission,):
+        mock_project.return_value = ResolvedProject(id="00000000-0000-0000-0000-000000000111", name="Global", basis="default")
         okareo = MagicMock()
         okareo.run_simulation.return_value = MagicMock(
             id="run-2", name="x", app_link="link"
@@ -399,14 +394,13 @@ class TestPeerKnobs:
         ))
 
         assert "error" not in result, result
-        assert okareo.run_simulation.call_args.kwargs["checks_at_every_turn"] is True
+        assert sim_submission.call_args.kwargs["simulation_params"].checks_at_every_turn is True
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_stop_check_object_threaded_through_non_augmented_path(
-        self, mock_client, mock_project, tools, mock_get_scenario_sets,
-    ):
-        mock_project.return_value = "00000000-0000-0000-0000-000000000111"
+        self, mock_client, mock_project, tools, mock_get_scenario_sets, sim_submission,):
+        mock_project.return_value = ResolvedProject(id="00000000-0000-0000-0000-000000000111", name="Global", basis="default")
         okareo = MagicMock()
         okareo.run_simulation.return_value = MagicMock(
             id="run-3", name="x", app_link="link"
@@ -422,8 +416,11 @@ class TestPeerKnobs:
         ))
 
         assert "error" not in result, result
-        stop = okareo.run_simulation.call_args.kwargs["stop_check"]
-        assert stop == {"check_name": "red_flag", "stop_on": True}
+        # The SDK's Simulation dataclass normalises a stop_check dict into a
+        # StopConfig; the values must survive that conversion intact.
+        stop = sim_submission.call_args.kwargs["simulation_params"].stop_check
+        assert stop.check_name == "red_flag"
+        assert stop.stop_on is True
 
 
 # ---------------------------------------------------------------------------
@@ -431,15 +428,14 @@ class TestPeerKnobs:
 # ---------------------------------------------------------------------------
 
 class TestBackwardCompatibility:
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_no_new_params_uses_legacy_path(
-        self, mock_client, mock_project, tools, mock_get_scenario_sets,
-    ):
+        self, mock_client, mock_project, tools, mock_get_scenario_sets, sim_submission,):
         """When the caller passes only the pre-feature parameters, we still
         call okareo.run_simulation (the SDK's high-level helper).
         """
-        mock_project.return_value = "00000000-0000-0000-0000-000000000111"
+        mock_project.return_value = ResolvedProject(id="00000000-0000-0000-0000-000000000111", name="Global", basis="default")
         okareo = MagicMock()
         okareo.run_simulation.return_value = MagicMock(
             id="run-legacy", name="x", app_link="link"
@@ -454,8 +450,8 @@ class TestBackwardCompatibility:
         ))
 
         assert "error" not in result, result
-        okareo.run_simulation.assert_called_once()
+        sim_submission.assert_called_once()
         # No new params leaked into the SDK call.
-        kwargs = okareo.run_simulation.call_args.kwargs
+        kwargs = sim_submission.call_args.kwargs
         assert "augmentation" not in kwargs
         assert "silence_timeout_ms" not in kwargs

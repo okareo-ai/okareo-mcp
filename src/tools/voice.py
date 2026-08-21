@@ -8,16 +8,21 @@ wrap the ``/v0/conversations/ingest`` or ``/v0/voice/integration*`` endpoints
 """
 
 import json
-from typing import Optional
+from typing import Annotated, Optional
+
+from pydantic import Field
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from src.error_handling import format_tool_error
 from src.okareo_client import (
+    PROJECT_PARAM_DESC,
     get_okareo_client,
     okareo_api_request,
-    resolve_project_id,
+    project_scoped,
+
+    resolve_project,
 )
 
 # Audio-source keys; a conversation needs at least one to be ingestable.
@@ -38,10 +43,11 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
+    @project_scoped
     def ingest_conversations(
         conversations: list[dict],
-        project_id: Optional[str] = None,
         mut_id: Optional[str] = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Submit completed voice conversations to Okareo for monitoring.
 
@@ -64,7 +70,6 @@ def register_tools(mcp: FastMCP) -> None:
                 monitor/filter-group matching), "diarization", "first_turn".
                 When both a transcript and audio are supplied, the transcript
                 takes precedence.
-            project_id: Okareo project ID. Defaults to the account's project.
             mut_id: Optional model-under-test ID. Omit for pure monitoring —
                 data points are then matched to monitors by their tags only.
         """
@@ -76,11 +81,10 @@ def register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return format_tool_error(e)
 
-        if not project_id:
-            try:
-                project_id = resolve_project_id(okareo)
-            except Exception as e:
-                return format_tool_error(e)
+        try:
+            project_id = resolve_project(okareo, project).id
+        except Exception as e:
+            return format_tool_error(e)
 
         # Per-conversation pre-validation. Invalid conversations are reported
         # individually; the valid remainder is still ingested (FR-016a).
@@ -143,11 +147,13 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
+    @project_scoped
     def connect_voice_integration(
         provider: str,
         webhook_auth_type: str,
         secrets: dict,
         metadata: Optional[dict] = None,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Connect a voice provider so its traffic flows into Okareo monitoring.
 
@@ -173,7 +179,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -206,7 +212,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    def list_voice_integrations(limit: int = 20) -> str:
+    @project_scoped
+    def list_voice_integrations(limit: int = 20, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """List the voice provider integrations in your Okareo project.
 
         Args:
@@ -215,7 +222,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -246,7 +253,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    def get_voice_integration(integration_id: str) -> str:
+    @project_scoped
+    def get_voice_integration(integration_id: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Retrieve a voice provider integration by id, including its status.
 
         Args:
@@ -254,6 +262,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             okareo = get_okareo_client()
+            resolve_project(okareo, project)
         except Exception as e:
             return format_tool_error(e)
         try:
@@ -273,7 +282,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    def update_voice_integration(integration_id: str, metadata: dict) -> str:
+    @project_scoped
+    def update_voice_integration(integration_id: str, metadata: dict, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Update a voice provider integration's metadata.
 
         Args:
@@ -282,6 +292,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             okareo = get_okareo_client()
+            resolve_project(okareo, project)
         except Exception as e:
             return format_tool_error(e)
         try:
@@ -305,8 +316,10 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
+    @project_scoped
     def rotate_voice_integration_secret(
-        integration_id: str, secrets: dict
+        integration_id: str, secrets: dict,
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
         """Rotate a voice provider integration's secrets.
 
@@ -319,6 +332,7 @@ def register_tools(mcp: FastMCP) -> None:
             return json.dumps({"error": "secrets must be a non-empty object."})
         try:
             okareo = get_okareo_client()
+            resolve_project(okareo, project)
         except Exception as e:
             return format_tool_error(e)
         try:
@@ -343,7 +357,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    def delete_voice_integration(integration_id: str) -> str:
+    @project_scoped
+    def delete_voice_integration(integration_id: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Delete a voice provider integration by id.
 
         Args:
@@ -351,6 +366,7 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             okareo = get_okareo_client()
+            resolve_project(okareo, project)
         except Exception as e:
             return format_tool_error(e)
         try:
@@ -374,7 +390,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    def get_voice_webhook_url(provider: str, public_id: Optional[str] = None) -> str:
+    @project_scoped
+    def get_voice_webhook_url(provider: str, public_id: Optional[str] = None, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Get the inbound webhook endpoint for a voice provider.
 
         Paste the returned URL into the provider's console so its call traffic
@@ -403,6 +420,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
+            resolve_project(okareo, project)
         except Exception as e:
             return format_tool_error(e)
         base = str(okareo.client.get_httpx_client().base_url).rstrip("/")

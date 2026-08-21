@@ -1,14 +1,14 @@
 """Unit tests for scenario management tools."""
 
 import json
-import sys
 import tempfile
 from unittest.mock import MagicMock, patch
 
 import pytest
+from src.okareo_client import ResolvedProject
 
 _PATCH_GET_CLIENT = "src.tools.scenarios.get_okareo_client"
-_PATCH_RESOLVE_PROJECT = "src.tools.scenarios.resolve_project_id"
+_PATCH_RESOLVE_PROJECT = "src.tools.scenarios.resolve_project"
 
 
 def _register_and_get_tools():
@@ -81,7 +81,7 @@ class TestListScenariosLimit:
     """T030: list_scenarios respects the limit parameter and sorts by created_date descending."""
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_default_limit_returns_20(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -105,7 +105,7 @@ class TestListScenariosLimit:
         assert result["scenarios"][0]["name"] == "scenario-029"
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_custom_limit(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -126,7 +126,7 @@ class TestListScenariosLimit:
         assert len(result["scenarios"]) == 5
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_limit_zero_returns_all(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -151,7 +151,7 @@ class TestListScenariosResponseShape:
     """T031: list_scenarios returns only the specified summary fields."""
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_response_has_correct_fields(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -189,7 +189,7 @@ class TestSaveScenarioTags:
     """T032: save_scenario accepts tags and calls update_scenario_set."""
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_tags_triggers_update(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -198,12 +198,19 @@ class TestSaveScenarioTags:
         mock_result = _make_mock_scenario_response(scenario_count=0)
         mock_client.create_scenario_set.return_value = mock_result
 
-        # Mock the update endpoint
-        with patch.dict(sys.modules, {
-            "okareo_api_client.api.default.update_scenario_set_v0_scenario_sets_scenario_id_put": MagicMock(),
-        }) as patched:
-            update_mod = patched["okareo_api_client.api.default.update_scenario_set_v0_scenario_sets_scenario_id_put"]
+        # Mock the update endpoint. patch.object on the parent package, not
+        # patch.dict(sys.modules): once any test (or the clone tool) has
+        # imported the submodule, it is bound onto the package and a
+        # sys.modules patch no longer intercepts the from-import.
+        from okareo_api_client.api import default as _default_pkg
+        import okareo_api_client.api.default.update_scenario_set_v0_scenario_sets_scenario_id_put  # noqa: F401
 
+        update_mod = MagicMock()
+        with patch.object(
+            _default_pkg,
+            "update_scenario_set_v0_scenario_sets_scenario_id_put",
+            update_mod,
+        ):
             rows = [{"input": "q1", "result": "a1"}]
             result = json.loads(tools["save_scenario"](name="tagged", rows=rows, tags=["qa", "v1"]))
 
@@ -211,7 +218,7 @@ class TestSaveScenarioTags:
             update_mod.sync.assert_called_once()
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_no_tags_skips_update(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -230,7 +237,7 @@ class TestSaveScenarioResponseShape:
     """T033: save_scenario returns the ScenarioSummary shape."""
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_response_has_correct_fields(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -265,7 +272,7 @@ class TestSaveScenarioRowCountFileUpload:
     """T022: save_scenario with file_path always uses file line count, not API scenario_count."""
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_row_count_from_file_ignores_api_zero(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -286,7 +293,7 @@ class TestSaveScenarioRowCountFileUpload:
         assert result["created"] is True
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_row_count_from_file_ignores_api_nonzero(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         """Even if API returns a non-zero scenario_count, file line count is used."""
         mock_client = MagicMock()
@@ -310,7 +317,7 @@ class TestSaveScenarioRowCountInlineRows:
     """T023: save_scenario with inline rows always uses len(rows), not API scenario_count."""
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_row_count_from_rows_ignores_api(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -336,7 +343,7 @@ class TestCreateScenarioVersionRowCount:
     """T024: create_scenario_version always uses len(rows), not API scenario_count."""
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_row_count_ignores_api(self, mock_resolve, mock_get_client, tools, mock_get_scenarios):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
@@ -375,7 +382,7 @@ class TestSaveScenarioContentPath:
 
     @patch(_PATCH_UPLOAD_BYTES)
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_content_uploads_via_bytes_with_row_count(
         self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
     ):
@@ -396,7 +403,7 @@ class TestSaveScenarioContentPath:
 
     @patch(_PATCH_UPLOAD_BYTES)
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_content_at_threshold_is_rejected(
         self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
     ):
@@ -412,7 +419,7 @@ class TestSaveScenarioContentPath:
 
     @patch(_PATCH_UPLOAD_BYTES)
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_content_just_under_threshold_succeeds(
         self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
     ):
@@ -432,7 +439,7 @@ class TestSaveScenarioGuidanceAndErrors:
 
     @patch(_PATCH_UPLOAD_BYTES)
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_malformed_line_rejected(
         self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
     ):
@@ -448,7 +455,7 @@ class TestSaveScenarioGuidanceAndErrors:
 
     @patch(_PATCH_UPLOAD_BYTES)
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_non_object_line_rejected(
         self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
     ):
@@ -463,7 +470,7 @@ class TestSaveScenarioGuidanceAndErrors:
 
     @patch(_PATCH_UPLOAD_BYTES)
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_empty_content_rejected(
         self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
     ):
@@ -488,7 +495,7 @@ class TestSaveScenarioGuidanceAndErrors:
 
     @patch(_PATCH_UPLOAD_BYTES)
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_content_over_byte_cap_rejected(
         self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
     ):
@@ -509,7 +516,7 @@ class TestSaveScenarioNoRegression:
     """US3 (T014): stdio file_path and inline rows behave as before."""
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_stdio_file_path_uploads_unchanged(
         self, mock_resolve, mock_get_client, tools, mock_get_scenarios, monkeypatch
     ):
@@ -531,7 +538,7 @@ class TestSaveScenarioNoRegression:
         mock_client.upload_scenario_set.assert_called_once()
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_rows_path_unchanged(
         self, mock_resolve, mock_get_client, tools, mock_get_scenarios
     ):
@@ -564,7 +571,7 @@ class TestSaveScenarioCardinalityAndIdempotency:
 
     @patch(_PATCH_UPLOAD_BYTES)
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_existing_name_is_idempotent_no_upload(
         self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
     ):
@@ -600,6 +607,7 @@ class TestSaveScenarioModeSpecificSchema:
             "content",
             "rows",
             "tags",
+            "project",
         }
 
     def test_hosted_description_never_mentions_file_path(self, monkeypatch):
@@ -678,7 +686,7 @@ class TestSaveScenarioStdioRegression:
         assert "rows" in result["error"]
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_hosted_rows_path_still_uses_create_scenario_set(
         self, mock_resolve, mock_get_client, mock_get_scenarios, monkeypatch
     ):
@@ -710,7 +718,7 @@ class TestAnalyticsAnnotations:
 
     @patch(_PATCH_UPLOAD_BYTES)
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_save_scenario_annotates_create(
         self, mock_resolve, mock_get_client, mock_upload, tools, mock_get_scenarios
     ):
@@ -735,7 +743,7 @@ class TestAnalyticsAnnotations:
         assert annotations["input_source"] == "content"
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_save_scenario_idempotent_annotates_existing_id(
         self, mock_resolve, mock_get_client, tools, mock_get_scenarios
     ):
@@ -758,7 +766,7 @@ class TestAnalyticsAnnotations:
         assert annotations["input_source"] == "content"
 
     @patch(_PATCH_GET_CLIENT)
-    @patch(_PATCH_RESOLVE_PROJECT, return_value="proj-123")
+    @patch(_PATCH_RESOLVE_PROJECT, return_value=ResolvedProject(id="proj-123", name="Global", basis="default"))
     def test_save_scenario_rows_input_source(
         self, mock_resolve, mock_get_client, tools, mock_get_scenarios
     ):

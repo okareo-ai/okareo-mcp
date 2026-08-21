@@ -71,23 +71,31 @@ def _export_to_shell_profile(api_key: str) -> Path | None:
     return profile
 
 
-def _build_server_entry(key_value: str) -> dict:
-    """Build the MCP server entry dict with the given key value."""
+def _build_server_entry(key_value: str, project: str | None = None) -> dict:
+    """Build the MCP server entry dict with the given key value.
+
+    An optional ``project`` pins this connection to one Okareo project
+    (FR-013/FR-034). It is the only project selection that survives across
+    conversations, since the server itself holds no state.
+    """
+    env = {"OKAREO_API_KEY": key_value}
+    if project:
+        env["OKAREO_PROJECT"] = project
     return {
         "command": "uvx",
         "args": ["okareo-mcp"],
-        "env": {
-            "OKAREO_API_KEY": key_value,
-        },
+        "env": env,
     }
 
 
-def _configure_claude_code(cwd: Path, api_key: str) -> list[str]:
+def _configure_claude_code(
+    cwd: Path, api_key: str, project: str | None = None
+) -> list[str]:
     """Configure Claude Code: write ${VAR} ref + shell profile export."""
     actions = []
 
     config_path = cwd / ".mcp.json"
-    entry = _build_server_entry("${OKAREO_API_KEY}")
+    entry = _build_server_entry("${OKAREO_API_KEY}", project)
     _update_mcp_config(config_path, entry)
     actions.append(f"  Wrote {config_path}")
 
@@ -100,24 +108,26 @@ def _configure_claude_code(cwd: Path, api_key: str) -> list[str]:
     return actions
 
 
-def _configure_cursor(cwd: Path, api_key: str) -> list[str]:
+def _configure_cursor(
+    cwd: Path, api_key: str, project: str | None = None
+) -> list[str]:
     """Configure Cursor: write literal key into .cursor/mcp.json."""
     actions = []
 
     config_path = cwd / ".cursor" / "mcp.json"
-    entry = _build_server_entry(api_key)
+    entry = _build_server_entry(api_key, project)
     _update_mcp_config(config_path, entry)
     actions.append(f"  Wrote {config_path}")
 
     return actions
 
 
-def _print_fallback_snippet(api_key: str) -> None:
+def _print_fallback_snippet(api_key: str, project: str | None = None) -> None:
     """Print a manual config snippet when no copilot is detected."""
     snippet = json.dumps(
         {
             "mcpServers": {
-                "okareo": _build_server_entry(api_key),
+                "okareo": _build_server_entry(api_key, project),
             },
         },
         indent=2,
@@ -152,6 +162,20 @@ def main() -> None:
         print("Get your API key from https://app.okareo.com")
         raise SystemExit(1)
 
+    # Optional project pin. Leaving it blank keeps today's behavior: the
+    # co-pilot chooses per conversation, or the organization's only project
+    # is used. Pinning is the one selection that survives across
+    # conversations (FR-013).
+    project = None
+    if "--project" in args:
+        idx = args.index("--project")
+        if idx + 1 < len(args):
+            project = args[idx + 1].strip() or None
+    elif sys.stdin.isatty():
+        project = input(
+            "Pin an Okareo project for this workspace (optional, Enter to skip): "
+        ).strip() or None
+
     cwd = Path.cwd()
     detected = _detect_copilots(cwd)
     any_configured = False
@@ -160,13 +184,13 @@ def main() -> None:
     # Configure detected copilots
     if detected["claude_code"]:
         print("\nDetected: Claude Code")
-        actions = _configure_claude_code(cwd, api_key)
+        actions = _configure_claude_code(cwd, api_key, project)
         all_actions.extend(actions)
         any_configured = True
 
     if detected["cursor"]:
         print("\nDetected: Cursor")
-        actions = _configure_cursor(cwd, api_key)
+        actions = _configure_cursor(cwd, api_key, project)
         all_actions.extend(actions)
         any_configured = True
 
@@ -182,17 +206,17 @@ def main() -> None:
         choice = input("\nSelect (1-4): ").strip()
 
         if choice in ("1", "3"):
-            actions = _configure_claude_code(cwd, api_key)
+            actions = _configure_claude_code(cwd, api_key, project)
             all_actions.extend(actions)
             any_configured = True
 
         if choice in ("2", "3"):
-            actions = _configure_cursor(cwd, api_key)
+            actions = _configure_cursor(cwd, api_key, project)
             all_actions.extend(actions)
             any_configured = True
 
         if choice == "4" or not any_configured:
-            _print_fallback_snippet(api_key)
+            _print_fallback_snippet(api_key, project)
             return
 
     # Print summary

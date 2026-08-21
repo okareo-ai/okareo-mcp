@@ -52,9 +52,11 @@ from src.key_registry import scan_provider_keys
 from src.okareo_client import create_okareo_client
 from src.tools import (
     checks,
+    clone,
     docs,
     insights,
     models,
+    projects,
     reps,
     scenarios,
     simulations,
@@ -301,7 +303,8 @@ _INSTRUCTIONS = (
     "LLM quality testing, scenario management, or model registration.\n\n"
     "TOOL DOMAINS:\n"
     "- Scenarios: save_scenario, list_scenarios, get_scenario, create_scenario_version, "
-    "preview_delete_scenario, delete_scenario\n"
+    "preview_delete_scenario, delete_scenario, move_scenario (dry-run first; "
+    "moves the Scenario and everything under it to another project)\n"
     "- Generation Models: list_available_llms, register_generation_model, "
     "list_generation_models, get_generation_model, update_generation_model, "
     "delete_generation_model\n"
@@ -316,10 +319,26 @@ _INSTRUCTIONS = (
     "rotate_voice_integration_secret, delete_voice_integration, get_voice_webhook_url\n"
     "- Analytics & Dashboards: query_analytics, list_dashboards, get_dashboard, "
     "save_dashboard, reorder_dashboards, delete_dashboard\n"
+    "- Projects: list_projects, select_project\n"
     "- Documentation: get_docs, get_templates\n"
     "- REPS Baseline: get_reps_baseline (serves REPS agent-evaluation baseline "
     "material — scenario banks, drivers, checks, eval configs — from the latest "
     "okareo-tools release; reps skills use it when no local copy exists)\n\n"
+    "PROJECTS — the active project is a user preference YOU manage:\n"
+    "Work in Okareo is organized into projects. Scenarios, simulations, "
+    "evaluations, and dashboards each belong to exactly one project; targets, "
+    "checks, and drivers are shared across all of them (a target keeps a home "
+    "project used only for live-traffic routing).\n"
+    "- When the user names a project, call select_project to validate it, then pass "
+    "project=\"<id>\" on every subsequent project-scoped call.\n"
+    "- Record the user's chosen project and reuse it in future conversations. This "
+    "server is stateless and does NOT remember it between calls or conversations.\n"
+    "- If a tool returns project_not_selected, show the returned project list and ask "
+    "the user which one they want. Never guess a project.\n"
+    "- If a tool returns project_misconfigured, the connection is pinned to a project "
+    "and the fix is in the MCP connection configuration, not in the conversation.\n"
+    "- New projects are created in the Okareo web application, not through these "
+    "tools.\n\n"
     "KEY WORKFLOWS:\n"
     "1. Evaluate a model: list_scenarios and list_generation_models to discover existing "
     "resources → save_scenario to create test data → register_generation_model to register "
@@ -727,6 +746,8 @@ docs.register_tools(mcp)
 reps.register_tools(mcp)
 voice.register_tools(mcp)
 insights.register_tools(mcp)
+projects.register_tools(mcp)
+clone.register_tools(mcp)
 # Tenant-management tools (FR-023..FR-029). Both no-op on stdio mode because
 # they immediately check credential.kind and require an OAuth session.
 tenants.register_tools(mcp)

@@ -114,3 +114,73 @@ def issuer_url() -> str:
 @pytest.fixture(scope="session")
 def resource_server_url() -> str:
     return _RESOURCE_SERVER
+
+
+@pytest.fixture(autouse=True)
+def _clear_active_project():
+    """Reset the resolved-project context between tests (036).
+
+    Production code always resolves inside ``@project_scoped`` or
+    ``project_resolution_scope()``, both of which reset on exit. Tests that
+    call ``resolve_project()`` directly have no such scope, so without this
+    the last resolution would bleed into the next test.
+    """
+    from src.okareo_client import _active_project
+
+    token = _active_project.set(None)
+    try:
+        yield
+    finally:
+        _active_project.reset(token)
+
+
+@pytest.fixture
+def sim_submission():
+    """Capture what a simulation actually submits (036 revision 2).
+
+    `run_simulation` no longer hands `okareo.run_simulation` a target name —
+    the SDK would resolve that name through an unscoped lookup that cannot see
+    a target in a non-Global project (research R13). It now resolves the
+    target inside the acting project and builds the run itself, so assertions
+    about what was submitted moved from that SDK call to `ModelUnderTest.run_test`.
+
+    Yields the patched `run_test` mock. `simulation_params` on it carries the
+    per-run knobs (repeats, max_turns, stop_check, ...); `checks` stays a
+    top-level keyword.
+    """
+    from unittest.mock import MagicMock, patch
+
+    default = MagicMock()
+    default.id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    default.name = "some-target"
+    default.project_id = "00000000-0000-0000-0000-000000000111"
+    default.models = {"custom_endpoint": {"type": "custom_endpoint"}}
+
+    def _resolve(okareo, name, project_id, kind="artifact"):
+        """Translate a test's existing target mock into the listing shape.
+
+        Tests written before revision 2 configure
+        `okareo.get_target_by_name.return_value` with a TargetModelResponse
+        shape (`.target` is the config dict). The resolver now returns the
+        models-under-test listing shape (`.models` is `{type: config}`).
+        Mapping one to the other keeps those tests asserting what they were
+        written to assert, instead of forcing every voice test to be rewritten.
+        """
+        configured = getattr(getattr(okareo, "get_target_by_name", None), "return_value", None)
+        config = getattr(configured, "target", None)
+        if isinstance(config, dict):
+            translated = MagicMock()
+            translated.id = getattr(configured, "id", default.id)
+            translated.name = getattr(configured, "name", name)
+            translated.project_id = project_id
+            translated.models = {config.get("type", "custom_endpoint"): config}
+            return translated
+        return default
+
+    with patch(
+        "src.tools.simulations.resolve_artifact_by_name", side_effect=_resolve
+    ), patch("okareo.model_under_test.ModelUnderTest.run_test") as run_test:
+        run_test.return_value = MagicMock(
+            id="run-1", name="sim", app_link="https://app.okareo.com/r"
+        )
+        yield run_test

@@ -4,6 +4,29 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from src.okareo_client import ResolvedProject
+
+
+@pytest.fixture(autouse=True)
+def _default_project_list():
+    """Make the real project resolver usable in tests that only mock the client.
+
+    036-project-scoping: tools now resolve a project, so a bare MagicMock
+    client would otherwise return a MagicMock from get_projects(). A
+    single-project organization is the pre-feature default and keeps these
+    tests asserting what they were written to assert.
+    """
+    from unittest.mock import patch as _patch
+
+    from src.okareo_client import ResolvedProject, _reset_for_tests
+
+    _reset_for_tests()
+    resolved = ResolvedProject(
+        id="00000000-0000-4000-8000-000000000001", name="Global", basis="default",
+    )
+    with _patch("src.tools.simulations.resolve_project", return_value=resolved):
+        yield
+    _reset_for_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -286,13 +309,13 @@ class TestSensitiveFieldsInjection:
 class TestGetTargetRewrite:
     """Test get_target uses the models_under_test endpoint for all target types."""
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_get_target_found_dict(self, mock_client, mock_project, tools):
         """get_target returns target config when found (dict response)."""
         mock_okareo = MagicMock()
         mock_client.return_value = mock_okareo
-        mock_project.return_value = "proj-123"
+        mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
         mock_mut = {
             "id": "mut-abc",
@@ -311,13 +334,13 @@ class TestGetTargetRewrite:
         assert result["name"] == "my-target"
         assert "target" in result
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_get_target_not_found(self, mock_client, mock_project, tools):
         """get_target returns error when target not found."""
         mock_okareo = MagicMock()
         mock_client.return_value = mock_okareo
-        mock_project.return_value = "proj-123"
+        mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
         with patch(
             "okareo_api_client.api.default.get_all_models_under_test_v0_models_under_test_get.sync",
@@ -330,13 +353,13 @@ class TestGetTargetRewrite:
         assert "error" in result
         assert "not found" in result["error"]
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_get_target_empty_list(self, mock_client, mock_project, tools):
         """get_target returns error when no targets exist."""
         mock_okareo = MagicMock()
         mock_client.return_value = mock_okareo
-        mock_project.return_value = "proj-123"
+        mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
         with patch(
             "okareo_api_client.api.default.get_all_models_under_test_v0_models_under_test_get.sync",
@@ -347,13 +370,13 @@ class TestGetTargetRewrite:
         assert "error" in result
         assert "not found" in result["error"]
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_get_target_voice_target_works(self, mock_client, mock_project, tools):
         """get_target works for voice targets (not just generation)."""
         mock_okareo = MagicMock()
         mock_client.return_value = mock_okareo
-        mock_project.return_value = "proj-123"
+        mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
         mock_mut = {
             "id": "mut-voice",
@@ -379,13 +402,13 @@ class TestGetTargetRewrite:
 class TestListTargets:
     """Test list_targets filters to voice and custom_endpoint targets only."""
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_mixed_entries_filters_correctly(self, mock_client, mock_project, tools):
         """Only voice and custom_endpoint entries are returned, not generation."""
         mock_okareo = MagicMock()
         mock_client.return_value = mock_okareo
-        mock_project.return_value = "proj-123"
+        mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
         muts = [
             {"id": "mut-gen", "name": "gen-model", "models": {"generation": {"model_id": "gpt-4o-mini"}}, "time_created": "2026-02-20T00:00:00"},
@@ -406,13 +429,13 @@ class TestListTargets:
         # Verify generation model excluded
         assert "gen-model" not in names
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_empty_list_returns_message(self, mock_client, mock_project, tools):
         """Empty MUT list returns empty targets with message."""
         mock_okareo = MagicMock()
         mock_client.return_value = mock_okareo
-        mock_project.return_value = "proj-123"
+        mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
         with patch(
             "okareo_api_client.api.default.get_all_models_under_test_v0_models_under_test_get.sync",
@@ -424,13 +447,13 @@ class TestListTargets:
         assert result["targets"] == []
         assert "message" in result
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_only_generation_models_returns_empty(self, mock_client, mock_project, tools):
         """When only generation models exist, list_targets returns empty."""
         mock_okareo = MagicMock()
         mock_client.return_value = mock_okareo
-        mock_project.return_value = "proj-123"
+        mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
         muts = [
             {"id": "mut-1", "name": "model-a", "models": {"generation": {"model_id": "gpt-4o"}}, "time_created": ""},
@@ -447,13 +470,13 @@ class TestListTargets:
         assert result["targets"] == []
         assert "message" in result
 
-    @patch("src.tools.simulations.resolve_project_id")
+    @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
     def test_voice_target_extracts_fields(self, mock_client, mock_project, tools):
         """Voice target entry has correct target_id, name, type, time_created."""
         mock_okareo = MagicMock()
         mock_client.return_value = mock_okareo
-        mock_project.return_value = "proj-123"
+        mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
 
         muts = [
             {"id": "mut-v1", "name": "my-phone-agent", "models": {"voice": {"edge_type": "twilio", "to_phone_number": "+15551234567"}}, "time_created": "2026-02-20T10:00:00"},
@@ -480,13 +503,16 @@ class TestListTargets:
 class TestDeleteTarget:
     """Test delete_target mirrors delete_generation_model with target-oriented naming."""
 
+    @patch("src.tools.simulations.resolve_artifact_by_name")
     @patch("src.tools.simulations.get_okareo_client")
-    def test_delete_target_success(self, mock_client, tools):
+    def test_delete_target_success(self, mock_client, mock_resolve_artifact, tools):
         """delete_target returns confirmation when target is found and deleted."""
         mock_okareo = MagicMock()
+        # Resolved inside the acting project (036 rev 2) rather than through
+        # okareo.get_model, whose lookup carries no project.
         mock_mut = MagicMock()
-        mock_mut.mut_id = "mut-abc-123"
-        mock_okareo.get_model.return_value = mock_mut
+        mock_mut.id = "mut-abc-123"
+        mock_resolve_artifact.return_value = mock_mut
         mock_client.return_value = mock_okareo
 
         with patch(
@@ -1161,7 +1187,7 @@ class TestVoiceDrivers:
 class TestAnalyticsAnnotations:
     """034: entity / project / usage attributes for driver + simulation."""
 
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.okareo_api_request")
     @patch("src.tools.simulations.get_okareo_client")
     def test_create_or_update_driver_annotations(
@@ -1189,7 +1215,7 @@ class TestAnalyticsAnnotations:
         assert annotations["language"] == "en"
         mock_resolve.assert_called_once()
 
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.okareo_api_request")
     @patch("src.tools.simulations.get_okareo_client")
     def test_create_or_update_driver_is_voice(
@@ -1215,11 +1241,10 @@ class TestAnalyticsAnnotations:
         assert annotations["is_voice"] is True
 
     @patch("src.tools.simulations._buffered_submit")
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_run_simulation_annotations_finished(
-        self, mock_client, mock_resolve, mock_buffered, tools
-    ):
+        self, mock_client, mock_resolve, mock_buffered, tools, sim_submission):
         from okareo_api_client.api import default as _default_pkg
 
         from src.analytics_context import call_scope
@@ -1258,11 +1283,10 @@ class TestAnalyticsAnnotations:
         assert annotations["project_id"] == "proj-1"
 
     @patch("src.tools.simulations._buffered_submit")
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_run_simulation_running_and_rerun(
-        self, mock_client, mock_resolve, mock_buffered, tools
-    ):
+        self, mock_client, mock_resolve, mock_buffered, tools, sim_submission):
         from okareo_api_client.api import default as _default_pkg
 
         from src.analytics_context import call_scope
@@ -1304,11 +1328,10 @@ class TestAnalyticsAnnotations:
         assert annotations["entity_id"] == "run-live"
 
     @patch("src.tools.simulations._buffered_submit")
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_run_simulation_failed_status(
-        self, mock_client, mock_resolve, mock_buffered, tools
-    ):
+        self, mock_client, mock_resolve, mock_buffered, tools, sim_submission):
         from okareo_api_client.api import default as _default_pkg
 
         from src.analytics_context import call_scope
@@ -1351,7 +1374,7 @@ class TestRunSimulationResolutionErrors:
         s.scenario_count = rows
         return s
 
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_missing_scenario_name_lists_candidates(
         self, mock_client, mock_resolve, tools
@@ -1377,7 +1400,7 @@ class TestRunSimulationResolutionErrors:
             {"name": "returns-cases", "rows": 3},
         ]
 
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_unknown_scenario_name_suggests_near_match(
         self, mock_client, mock_resolve, tools
@@ -1401,7 +1424,7 @@ class TestRunSimulationResolutionErrors:
         assert out["available_scenarios"] == [{"name": "billing-cases", "rows": 5}]
 
     @patch("src.tools.simulations._fetch_targets")
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_missing_target_name_lists_candidates(
         self, mock_client, mock_resolve, mock_targets, tools
@@ -1431,12 +1454,11 @@ class TestRunSimulationResolutionErrors:
     @patch("src.tools.simulations._fetch_drivers")
     @patch("src.tools.simulations._fetch_targets")
     @patch("src.tools.simulations._buffered_submit")
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_rerun_resolves_target_and_driver_by_id(
         self, mock_client, mock_resolve, mock_buffered, mock_targets,
-        mock_drivers, tools,
-    ):
+        mock_drivers, tools, sim_submission,):
         """mut_id/driver_id from the original run map to names, not to the run name."""
         from okareo_api_client.api import default as _default_pkg
 
@@ -1474,7 +1496,7 @@ class TestRunSimulationResolutionErrors:
         assert out["driver"] == "angry-caller"
 
     @patch("src.tools.simulations._fetch_targets", return_value=[])
-    @patch("src.tools.simulations.resolve_project_id", return_value="proj-1")
+    @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_rerun_with_deleted_scenario_explains_why(
         self, mock_client, mock_resolve, mock_targets, tools
@@ -1520,7 +1542,7 @@ class TestListSimulationsMetricsRequest:
         find = MagicMock(return_value=[])
 
         with patch("src.tools.simulations.get_okareo_client", return_value=MagicMock()), \
-             patch("src.tools.simulations.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch("src.tools.simulations.find_test_runs", find):
             tools["list_simulations"](detail_level=detail_level)
 

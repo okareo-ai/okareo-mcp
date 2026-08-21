@@ -11,13 +11,22 @@ Provides six MCP tools for the generation model (MUT) lifecycle:
 """
 
 import json
+from typing import Annotated, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import Field
+
 from okareo_api_client.errors import UnexpectedStatus
 
-from src.error_handling import format_tool_error
-from src.okareo_client import get_okareo_client, resolve_project_id
+from src.error_handling import ArtifactNotInProject, format_tool_error
+from src.okareo_client import (
+    PROJECT_PARAM_DESC,
+    get_okareo_client,
+    resolve_artifact_by_name,
+    project_scoped,
+    resolve_project,
+)
 
 
 def _get_attr(obj, attr, default=None):
@@ -113,7 +122,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    def register_generation_model(name: str, model_name: str) -> str:
+    @project_scoped
+    def register_generation_model(name: str, model_name: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Register a generation model for testing by selecting an LLM from the registry.
 
         Creates a generation model (Model Under Test) that points to a specific LLM
@@ -128,7 +138,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -156,7 +166,7 @@ def register_tools(mcp: FastMCP) -> None:
             return format_tool_error(e)
 
         return json.dumps({
-            "id": _get_attr(mut, "mut_id", ""),
+            "id": _get_attr(mut, "id", ""),
             "name": _get_attr(mut, "name", name),
             "model_name": model_name,
             "app_link": _get_attr(mut, "app_link", ""),
@@ -171,7 +181,10 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def list_generation_models() -> str:
+    @project_scoped
+    def list_generation_models(
+        project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
+    ) -> str:
         """Browse all registered generation models in the project.
 
         Returns generation model names, IDs, target LLM configurations, and
@@ -184,7 +197,7 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
@@ -258,7 +271,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def get_generation_model(name: str) -> str:
+    @project_scoped
+    def get_generation_model(name: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Read detailed information about a registered generation model.
 
         Returns the generation model's target LLM configuration, tags, creation
@@ -269,11 +283,16 @@ def register_tools(mcp: FastMCP) -> None:
         """
         try:
             okareo = get_okareo_client()
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
         try:
-            mut = okareo.get_model(name=name)
+            mut = resolve_artifact_by_name(okareo, name, project_id, kind="model")
+        except ArtifactNotInProject as e:
+            # FR-030: keep the structured outcome — it names the
+            # project searched and what is available there.
+            return format_tool_error(e)
         except Exception:
             return json.dumps({
                 "error": f"Generation model '{name}' not found. "
@@ -306,7 +325,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=True,
         ),
     )
-    def update_generation_model(name: str, model_name: str) -> str:
+    @project_scoped
+    def update_generation_model(name: str, model_name: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Change the LLM that a registered generation model points to.
 
         Updates the generation model to use a different LLM from the registry.
@@ -320,13 +340,17 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
-            project_id = resolve_project_id(okareo)
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
         # Verify the generation model exists
         try:
-            okareo.get_model(name=name)
+            resolve_artifact_by_name(okareo, name, project_id, kind="model")
+        except ArtifactNotInProject as e:
+            # FR-030: keep the structured outcome — it names the
+            # project searched and what is available there.
+            return format_tool_error(e)
         except Exception:
             return json.dumps({
                 "error": f"Generation model '{name}' not found. "
@@ -374,7 +398,8 @@ def register_tools(mcp: FastMCP) -> None:
             openWorldHint=False,
         ),
     )
-    def delete_generation_model(name: str) -> str:
+    @project_scoped
+    def delete_generation_model(name: str, project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None) -> str:
         """Remove a registered generation model and all its related test data.
 
         Permanently deletes the generation model and cascades to associated
@@ -389,13 +414,18 @@ def register_tools(mcp: FastMCP) -> None:
 
         try:
             okareo = get_okareo_client()
+            project_id = resolve_project(okareo, project).id
         except Exception as e:
             return format_tool_error(e)
 
         # Look up generation model by name to get ID
         try:
-            mut = okareo.get_model(name=name)
-            mut_id = _get_attr(mut, "mut_id", "")
+            mut = resolve_artifact_by_name(okareo, name, project_id, kind="model")
+            mut_id = _get_attr(mut, "id", "")
+        except ArtifactNotInProject as e:
+            # FR-030: keep the structured outcome — it names the
+            # project searched and what is available there.
+            return format_tool_error(e)
         except Exception:
             return json.dumps({
                 "error": f"Generation model '{name}' not found. "

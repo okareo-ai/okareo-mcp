@@ -11,6 +11,7 @@ import json
 from types import SimpleNamespace
 
 from src.tools.tests import _get_attr, _serialize_value
+from src.okareo_client import ResolvedProject
 
 
 class Unset:
@@ -93,7 +94,7 @@ def _check_brief(name, check_id):
 
 class TestReevaluateTestRun:
     @patch("src.tools.tests._find_test_run")
-    @patch("src.tools.tests.resolve_project_id")
+    @patch("src.tools.tests.resolve_project")
     @patch("src.tools.tests.get_okareo_client")
     def test_reevaluate_with_explicit_checks(
         self, mock_client, mock_resolve, mock_find, monkeypatch
@@ -106,7 +107,7 @@ class TestReevaluateTestRun:
         ]
         okareo.re_evaluate.return_value = {"reevaluated": True}
         mock_client.return_value = okareo
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_find.return_value = {"id": "run-1", "status": "FINISHED"}
 
         result = json.loads(_tests_tools()["reevaluate_test_run"](
@@ -121,7 +122,7 @@ class TestReevaluateTestRun:
 
     @patch("src.tools.tests._derive_run_check_ids")
     @patch("src.tools.tests._find_test_run")
-    @patch("src.tools.tests.resolve_project_id")
+    @patch("src.tools.tests.resolve_project")
     @patch("src.tools.tests.get_okareo_client")
     def test_reevaluate_defaults_to_existing_checks(
         self, mock_client, mock_resolve, mock_find, mock_derive,
@@ -132,7 +133,7 @@ class TestReevaluateTestRun:
         okareo.get_all_checks.return_value = [_check_brief("coherence", "id-coh")]
         okareo.re_evaluate.return_value = {"reevaluated": True}
         mock_client.return_value = okareo
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_find.return_value = {"id": "run-1", "status": "FINISHED"}
         mock_derive.return_value = ["id-coh"]
 
@@ -144,14 +145,14 @@ class TestReevaluateTestRun:
         mock_derive.assert_called_once()
 
     @patch("src.tools.tests._find_test_run")
-    @patch("src.tools.tests.resolve_project_id")
+    @patch("src.tools.tests.resolve_project")
     @patch("src.tools.tests.get_okareo_client")
     def test_reevaluate_rejects_non_terminal_run(
         self, mock_client, mock_resolve, mock_find, monkeypatch
     ):
         monkeypatch.setenv("OKAREO_API_KEY", "k")
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_find.return_value = {"id": "run-1", "status": "RUNNING"}
 
         result = json.loads(_tests_tools()["reevaluate_test_run"](
@@ -162,14 +163,14 @@ class TestReevaluateTestRun:
         assert "not complete" in result["error"]
 
     @patch("src.tools.tests._find_test_run")
-    @patch("src.tools.tests.resolve_project_id")
+    @patch("src.tools.tests.resolve_project")
     @patch("src.tools.tests.get_okareo_client")
     def test_reevaluate_run_not_found(
         self, mock_client, mock_resolve, mock_find, monkeypatch
     ):
         monkeypatch.setenv("OKAREO_API_KEY", "k")
         mock_client.return_value = MagicMock()
-        mock_resolve.return_value = "proj-1"
+        mock_resolve.return_value = ResolvedProject(id="proj-1", name="Global", basis="default")
         mock_find.return_value = None
 
         result = json.loads(_tests_tools()["reevaluate_test_run"](
@@ -186,23 +187,43 @@ class TestReevaluateTestRun:
 
 class TestRunTestToolHandoff:
     def _wire(self, mock_client, mock_resolve, run_test_impl):
-        """Common okareo/scenario wiring; run_test_impl drives mut.run_test."""
+        """Common okareo/scenario wiring; run_test_impl drives mut.run_test.
+
+        036 rev 2: run_test resolves the model inside the acting project and
+        builds the ModelUnderTest from that record, so the submission is
+        patched on the class rather than on a stubbed okareo.get_model().
+        """
         scenario = SimpleNamespace(name="my-scenario", scenario_id="sid")
         scen_mod = MagicMock()
         scen_mod.sync.return_value = [scenario]
 
         okareo = MagicMock()
         okareo.api_key = "k"
-        mut = MagicMock()
-        mut.run_test.side_effect = run_test_impl
-        okareo.get_model.return_value = mut
         okareo.get_all_checks.return_value = [_check_brief("coherence", "id-coh")]
         mock_client.return_value = okareo
-        mock_resolve.return_value = "proj"
+        mock_resolve.return_value = ResolvedProject(id="proj", name="Global", basis="default")
+
+        resolved = MagicMock()
+        resolved.id = "mut-1"
+        resolved.name = "my-model"
+        resolved.models = {}
+        self._patches = [
+            patch("src.tools.tests.resolve_artifact_by_name", return_value=resolved),
+            patch("okareo.model_under_test.ModelUnderTest.run_test"),
+        ]
+        started = [p.start() for p in self._patches]
+        run_test_mock = started[1]
+        run_test_mock.side_effect = run_test_impl
+        mut = SimpleNamespace(run_test=run_test_mock)
         return okareo, mut, scen_mod
 
+    def teardown_method(self):
+        for p in getattr(self, "_patches", []):
+            p.stop()
+        self._patches = []
+
     @patch("src.tools.simulations._find_runs", lambda *a, **k: {})
-    @patch("src.tools.tests.resolve_project_id")
+    @patch("src.tools.tests.resolve_project")
     @patch("src.tools.tests.get_okareo_client")
     def test_finished_inline_returns_handoff(self, mock_client, mock_resolve):
         from okareo_api_client.api import default as _default_pkg
@@ -234,7 +255,7 @@ class TestRunTestToolHandoff:
         mut.run_test.assert_called_once()
 
     @patch("src.tools.simulations._find_runs", lambda *a, **k: {})
-    @patch("src.tools.tests.resolve_project_id")
+    @patch("src.tools.tests.resolve_project")
     @patch("src.tools.tests.get_okareo_client")
     def test_failure_surfaces_inline(self, mock_client, mock_resolve):
         from okareo_api_client.api import default as _default_pkg
@@ -280,7 +301,7 @@ class TestAnalyticsAnnotations:
         ]
 
         with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
-             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch("src.tools.tests.find_test_runs", return_value=[{
                  "id": "run-abc",
                  "name": "my-run",
@@ -307,7 +328,7 @@ class TestAnalyticsAnnotations:
         mock_okareo.find_test_data_points.return_value = []
 
         with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
-             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch(
                  "src.tools.tests.find_test_runs",
                  return_value=[{
@@ -332,7 +353,7 @@ class TestAnalyticsAnnotations:
         mock_okareo = MagicMock()
 
         with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
-             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch("src.tools.tests.find_test_runs", return_value=[]), \
              call_scope() as annotations:
             out = json.loads(tools["get_test_run_results"](name="missing"))
@@ -370,7 +391,7 @@ class TestAnalyticsAnnotations:
         ]
 
         with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
-             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch("src.tools.tests.find_test_runs", return_value=[{
                  "id": "run-1", "name": "r", "model_metrics": {},
              }]), \
@@ -400,7 +421,7 @@ class TestAnalyticsAnnotations:
         ]
 
         with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
-             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch("src.tools.tests.find_test_runs", return_value=[{
                  "id": "run-1",
                  "name": "r",
@@ -447,7 +468,7 @@ class TestAnalyticsAnnotations:
         mock_okareo, run = self._multiturn_run_and_points()
 
         with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
-             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch("src.tools.tests.find_test_runs", return_value=run):
             tools = _tests_tools()
             out = json.loads(tools["get_conversation_transcript"](
@@ -462,7 +483,7 @@ class TestAnalyticsAnnotations:
         mock_okareo, run = self._multiturn_run_and_points()
 
         with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
-             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch("src.tools.tests.find_test_runs", return_value=run):
             tools = _tests_tools()
             out = json.loads(tools["get_conversation_transcript"](
@@ -475,7 +496,7 @@ class TestAnalyticsAnnotations:
         mock_okareo, run = self._multiturn_run_and_points()
 
         with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
-             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch("src.tools.tests.find_test_runs", return_value=run):
             tools = _tests_tools()
             out = json.loads(tools["get_test_run_results"](test_run_id="run-1"))
@@ -497,9 +518,32 @@ class TestListToolsSkipRowLevelMetrics:
         find = MagicMock(return_value=[])
 
         with patch("src.tools.tests.get_okareo_client", return_value=MagicMock()), \
-             patch("src.tools.tests.resolve_project_id", return_value="proj-1"), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
              patch("src.tools.tests.find_test_runs", find):
             json.loads(tools["list_test_runs"]())
 
         payload = find.call_args[0][1]
         assert payload.return_model_metrics is False
+
+    def test_get_test_run_results_by_name_does_not_request_row_level_metrics(self):
+        # Resolving by name has no id to filter on, so it pulls every run in the
+        # project -- the same unbounded shape as the list tools.
+        from unittest.mock import MagicMock, patch
+
+        tools = _tests_tools()
+        mock_okareo = MagicMock()
+        mock_okareo.find_test_data_points.return_value = []
+        find = MagicMock(return_value=[
+            {"id": "run-1", "name": "nightly", "start_time": "2026-08-01T00:00:00Z"},
+        ])
+
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
+             patch("src.tools.tests.find_test_runs", find):
+            out = json.loads(tools["get_test_run_results"](name="nightly"))
+
+        assert "error" not in out
+        payload = find.call_args_list[0][0][1]
+        assert payload.return_model_metrics is False
+        # Guards the reason it matters: unset id means an all-runs fetch.
+        assert not getattr(payload, "id", None)
