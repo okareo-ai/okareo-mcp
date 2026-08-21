@@ -10,11 +10,13 @@ Two tools, both read-only over Projects:
 
 There is deliberately no *ad-hoc* project-creating tool. 036's FR-025 ("no
 tool creates a project") was superseded 2026-08-19 by 037-project-clone:
-``clone_project`` (src/tools/clone.py) creates its own destination Project as
-the first step of a clone, and is the ONLY Project-creating tool — the guard
-test in tests/unit/test_projects.py holds that boundary. Everything else
-about Project lifecycle still belongs to the Okareo web application, so both
-tools here keep naming it as where new projects come from (FR-026).
+``clone_project`` (src/tools/clone.py) is the ONLY Project-creating tool.
+Since 039-server-side-clone the creation itself happens server-side, inside
+the backend's ``POST /v0/projects/{id}/clone`` transaction — no tool module
+calls the SDK's ``create_project`` at all; the guard test in
+tests/unit/test_projects.py holds both halves of that boundary. Everything
+else about Project lifecycle still belongs to the Okareo web application, so
+both tools here keep naming it as where new projects come from (FR-026).
 
 ``select_project`` **stores nothing**. The server is stateless by requirement
 (FR-009), so a conversational selection can only live in the co-pilot's own

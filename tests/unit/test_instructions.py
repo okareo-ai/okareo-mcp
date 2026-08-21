@@ -67,9 +67,11 @@ REGISTERED_TOOLS = {
     # Tenant management (FR-023..FR-029, added 2026-05-18)
     "list_tenants",
     "switch_tenant",
-    # Projects (036-project-scoping) — read-only: no creation tool exists
+    # Projects (036-project-scoping; clone_project added by 037, thinned to
+    # the server-side clone endpoint by 039)
     "list_projects",
     "select_project",
+    "clone_project",
 }
 
 

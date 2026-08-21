@@ -155,8 +155,11 @@ class TestSelectProject:
 
 
 class TestProjectCreationBoundary:
-    """036 FR-025, superseded by 037 FR-006: clone_project is the ONLY
-    Project-creating tool. A negative requirement needs an explicit guard."""
+    """036 FR-025, superseded by 037 FR-006, revised by 039: clone_project is
+    the ONLY Project-creating tool, and since 039 the creation itself happens
+    server-side inside POST /v0/projects/{id}/clone — no tool module calls
+    the SDK's create_project at all. A negative requirement needs an explicit
+    guard."""
 
     def test_clone_project_is_the_only_project_creating_tool(self):
         from src.server import mcp
@@ -177,19 +180,22 @@ class TestProjectCreationBoundary:
             "destination, nothing else creates or mutates Projects."
         )
 
-    def test_only_the_clone_module_calls_the_sdk_create_project(self):
-        """Structural half of the boundary: no other tool module may grow a
-        create_project call without this test noticing."""
+    def test_no_tool_module_calls_the_sdk_create_project(self):
+        """Structural half of the boundary: since 039 the destination Project
+        is created by the backend's clone transaction, so the SDK's
+        create_project must appear NOWHERE in src/tools/ — clone.py
+        included."""
         from pathlib import Path
 
         tools_dir = Path(__file__).resolve().parents[2] / "src" / "tools"
         offenders = sorted(
             f.name
             for f in tools_dir.glob("*.py")
-            if f.name != "clone.py" and "create_project(" in f.read_text()
+            if "create_project(" in f.read_text()
         )
         assert offenders == [], (
-            f"create_project called outside src/tools/clone.py: {offenders}"
+            f"create_project called in src/tools/ (creation moved server-side "
+            f"in 039): {offenders}"
         )
 
     def test_project_tool_surface_is_exactly_two_read_only_tools(self):

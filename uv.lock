@@ -664,7 +664,7 @@ wheels = [
 
 [[package]]
 name = "okareo-mcp"
-version = "0.0.46"
+version = "0.0.48"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
