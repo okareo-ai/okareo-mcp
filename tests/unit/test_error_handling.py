@@ -76,8 +76,9 @@ class TestProjectErrors:
         return json.loads(format_tool_error(exc))["error"]
 
     def test_not_selected_carries_code_projects_and_creation_note(self):
-        """FR-020 + FR-026: enough for the co-pilot to ask, and to answer
-        'then make me one' without improvising."""
+        """FR-020 + 040 FR-012: enough for the co-pilot to ask, and to answer
+        'then make me one' without improvising — which since 040 means naming
+        the tool that makes one, not sending the user to a browser."""
         from src.error_handling import PROJECT_CREATION_NOTE, ProjectNotSelected
 
         err = self._payload(
@@ -89,7 +90,8 @@ class TestProjectErrors:
         assert err["code"] == "project_not_selected"
         assert [p["name"] for p in err["projects"]] == ["Global", "Billing"]
         assert err["note"] == PROJECT_CREATION_NOTE
-        assert "Okareo web application" in err["note"]
+        assert "create_project" in err["note"]
+        assert "web application" not in err["note"]
 
     def test_not_found_carries_code_and_projects(self):
         from src.error_handling import ProjectNotFound

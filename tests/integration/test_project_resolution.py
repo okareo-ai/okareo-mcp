@@ -177,20 +177,24 @@ class TestPinnedConnection:
 
 
 class TestTheAskPathAnswersTheObviousFollowUp:
-    """FR-026 / research R11 — 'then make me one' must not be improvised."""
+    """036 FR-026 / research R11, superseded by 040 FR-012 — 'then make me
+    one' must not be improvised. 036 answered it by naming the Okareo web
+    application, because no tool could create a Project. 040 answers it with
+    the tool."""
 
-    def test_not_selected_names_where_projects_are_created(self):
+    def test_not_selected_names_the_tool_that_creates_a_project(self):
         tools = _scenario_tools()
         with patch(
             "src.tools.scenarios.get_okareo_client", return_value=_okareo(MULTI)
         ):
             out = json.loads(tools["list_scenarios"]())
-        assert "Okareo web application" in out["error"]["note"]
+        assert "create_project" in out["error"]["note"]
 
-    def test_no_creation_tool_exists_to_call_instead(self):
+    def test_the_named_creation_tool_actually_exists(self):
+        """The note is only useful if the co-pilot can call what it names."""
         from src.server import mcp
 
-        assert "create_project" not in mcp._tool_manager._tools
+        assert "create_project" in mcp._tool_manager._tools
 
 
 # ---------------------------------------------------------------------------

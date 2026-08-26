@@ -202,6 +202,22 @@ Then use `"command": "okareo-mcp"` instead of `"command": "uvx"` with `"args": [
 | `delete_voice_integration` | Delete a voice provider integration by ID |
 | `get_voice_webhook_url` | Get the inbound webhook endpoint for a voice provider |
 
+### Projects
+
+| Tool | Description |
+|------|-------------|
+| `list_projects` | List every project you can work in — id, name, tags, archive state — with the active one marked |
+| `select_project` | Choose the project to work in for this conversation |
+| `create_project` | Create a new project |
+| `update_project` | Rename a project, or replace its tags |
+| `archive_project` | Hide a project from the project picker. Reversible; nothing is deleted |
+| `unarchive_project` | Restore an archived project to the picker |
+| `clone_project` | Copy an existing project's scenarios into a new project (dry-run first) |
+
+> Okareo has no project **delete** — in the app, the API, or here. Archiving is
+> the removal, and it only hides the project from the picker: its scenarios,
+> runs, and dashboards stay intact and every tool still works against it.
+
 ### Analytics & Dashboards
 
 | Tool | Description |

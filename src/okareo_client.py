@@ -84,11 +84,12 @@ _project_cache: dict[tuple[str, str], tuple[float, list[ProjectResponse]]] = {}
 _PROJECT_CACHE_BOUND = 512
 
 # The TTL is the primary freshness mechanism for out-of-process changes
-# (projects created in the Okareo web application). Since 037 superseded
-# FR-025, one in-process event creates a Project — clone_project — and it
-# MUST call invalidate_projects_cache() afterward, or every project-scoped
-# tool serves a list without the new Project until the TTL expires
-# (research R4; 037 CR-1).
+# (projects created or renamed in the Okareo web application). Five in-process
+# events now change this list — clone_project (037), and create_project,
+# update_project, archive_project, unarchive_project (040) — and each one MUST
+# call invalidate_projects_cache() on success, or every project-scoped tool
+# serves a stale list for up to the TTL and the co-pilot reports a change the
+# next call contradicts (research R4; 037 CR-1; 040 FR-007).
 _PROJECT_CACHE_TTL_SECONDS = 60.0
 
 
@@ -100,11 +101,17 @@ def _reset_for_tests() -> None:
 def invalidate_projects_cache(okareo: Okareo) -> None:
     """Drop the caller's cached project list after an in-process change.
 
-    The one production caller is ``clone_project`` (037), immediately after
-    it creates the destination Project: the clone primes the cache while
-    resolving its source, so without this the new Project is invisible to
-    every other tool — including the clone report's own follow-on steps
-    (register a Target there, select_project) — for up to the TTL.
+    Five production callers, one per tool that changes the list:
+    ``clone_project`` (037), and ``create_project``, ``update_project``,
+    ``archive_project``, ``unarchive_project`` (040). Each calls this on
+    success only — a refused write changed nothing, so the cache is still
+    right.
+
+    Why it matters: these tools prime the cache while resolving their target,
+    so without the drop the change is invisible to every other tool for up to
+    the TTL. A clone's own follow-on steps (register a Target there,
+    select_project) would not see the new Project; a rename would leave the
+    co-pilot reporting a change the next call contradicts.
     """
     base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
     try:

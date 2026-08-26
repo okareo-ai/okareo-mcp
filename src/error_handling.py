@@ -20,10 +20,14 @@ _BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9._\-+/=_]{20,}")
 _AUTHZ_HEADER_PATTERN = re.compile(r"Authorization:\s*\S+", re.IGNORECASE)
 
 
-# Where new Projects come from. The MCP is read-only over Projects (FR-025),
-# so any surface that could read as "ask the server to make one" must say
-# where creation actually happens (FR-026).
-PROJECT_CREATION_NOTE = "New projects are created in the Okareo web application."
+# Where new Projects come from. 036 FR-026 pointed at the Okareo web
+# application because no tool could make one; 040-project-lifecycle-tools
+# retires that. A "not selected" error is exactly the moment the user may want
+# a Project that does not exist yet, so name the tool that makes one.
+PROJECT_CREATION_NOTE = (
+    "No project yet? create_project makes one, or clone_project copies an "
+    "existing project's scenarios into a new one."
+)
 
 
 class ProjectError(Exception):

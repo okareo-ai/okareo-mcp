@@ -68,10 +68,14 @@ REGISTERED_TOOLS = {
     "list_tenants",
     "switch_tenant",
     # Projects (036-project-scoping; clone_project added by 037, thinned to
-    # the server-side clone endpoint by 039)
+    # the server-side clone endpoint by 039; lifecycle tools added by 040)
     "list_projects",
     "select_project",
     "clone_project",
+    "create_project",
+    "update_project",
+    "archive_project",
+    "unarchive_project",
 }
 
 
