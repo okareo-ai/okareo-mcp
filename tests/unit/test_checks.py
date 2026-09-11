@@ -68,11 +68,17 @@ def _make_mock_check_brief(name="test-check", check_id="test-uuid-123", is_prede
 # ---------------------------------------------------------------------------
 
 class TestToolRegistration:
-    def test_four_tools_registered(self, tools):
-        assert len(tools) == 4
+    def test_five_tools_registered(self, tools):
+        assert len(tools) == 5
 
     def test_tool_names(self, tools):
-        expected = ["create_or_update_check", "generate_check", "get_check", "delete_check"]
+        expected = [
+            "create_or_update_check",
+            "generate_check",
+            "get_check",
+            "delete_check",
+            "calibrate_check",
+        ]
         for name in expected:
             assert name in tools, f"Expected tool '{name}' to be registered"
 

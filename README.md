@@ -173,6 +173,7 @@ Then use `"command": "okareo-mcp"` instead of `"command": "uvx"` with `"args": [
 | `generate_check` | Generate a check from a natural-language description, then save it |
 | `get_check` | Retrieve a check's full configuration, including its prompt template or code |
 | `delete_check` | Permanently delete a check by name |
+| `calibrate_check` | Dry-run a draft check against a finished test run — per-row verdicts and the arguments the check received, saving nothing |
 
 ### Simulations (Multi-Turn)
 

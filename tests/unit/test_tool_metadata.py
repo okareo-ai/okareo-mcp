@@ -13,7 +13,7 @@ import pytest
 
 from src.server import mcp
 
-EXPECTED_TOOL_COUNT = 59  # +2: list_projects, select_project (036); +1: clone_project (037); +1: move_scenario (038); +4: create/update/archive/unarchive_project (040)
+EXPECTED_TOOL_COUNT = 60  # +2: list_projects, select_project (036); +1: clone_project (037); +1: move_scenario (038); +4: create/update/archive/unarchive_project (040); +1: calibrate_check (042)
 
 
 def _tools():

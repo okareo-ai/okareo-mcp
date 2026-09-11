@@ -2,13 +2,15 @@
 
 A Boolean Check evaluates whether a target's output meets a specific criterion and returns a pass/fail (true/false) result. Use this when you need a binary quality gate.
 
+Two kinds of slot appear below and they are not interchangeable. `<angle>` slots are yours: replace them with your own text before saving. `{brace}` placeholders are Okareo's: leave them exactly as written and Okareo substitutes the row's data at evaluation time.
+
 ## Prompt Structure
 
 ```
 You are an expert evaluator. Your task is to determine whether the following output meets the specified criterion.
 
 ## Criterion
-{criterion_description}
+<criterion_description>
 
 ## Input
 {scenario_input}
@@ -24,9 +26,20 @@ Do not explain your reasoning. Return only "true" or "false".
 
 ## Placeholders
 
+### Fill these in yourself
+
+Replace each slot with your own text before saving the check. Okareo does not substitute these — a slot left unreplaced reaches the judge as literal text.
+
+| Slot | What to write |
+|------|---------------|
+| `<criterion_description>` | The specific quality criterion to check (e.g., "The response is factually accurate") |
+
+### Runtime placeholders
+
+Okareo substitutes these with the row's data at evaluation time. Leave them exactly as written.
+
 | Placeholder | Description |
 |-------------|-------------|
-| `{criterion_description}` | The specific quality criterion to check (e.g., "The response is factually accurate") |
 | `{scenario_input}` | The original user input from the scenario |
 | `{model_output}` | The target's actual response to evaluate |
 
@@ -45,8 +58,11 @@ The prompt template above uses the most common placeholders. The full set availa
 | `{tools}` | The tool definitions/schema available to the model |
 | `{model_output_metadata}` | Metadata attached to the most recent model output |
 | `{simulation_message_history}` | Full conversation history reconstructed from trace metadata. Only populated for traced (ingested) conversations; for simulations and evaluations use `{message_history}` |
+| `{user_only_audio}` | The user's audio only, for speaker-scoped audio checks. Audio checks only — empty on text evaluations |
 
-> The legacy `{generation}` placeholder is deprecated — use `{model_output}` instead.
+### Rejected placeholders
+
+> Okareo rejects any placeholder that is not listed above. That includes the legacy aliases `{generation}`, `{input}`, `{result}`, `{audio_messages}`, and `{audio_output}` — use `{model_output}`, `{scenario_input}`, `{scenario_result}`, and `{user_only_audio}` instead. A rejected prompt fails on save and fails `calibrate_check`.
 
 ## Example Criteria
 

@@ -1,22 +1,28 @@
 """Check management tools for the Okareo MCP server.
 
-Provides four MCP tools for creating, generating, reading, and deleting checks:
+Provides five MCP tools for creating, generating, reading, calibrating, and
+deleting checks:
 
 - create_or_update_check: Create or update a quality check by name (upsert)
 - generate_check: Generate a check from a natural language description
 - get_check: Retrieve the full configuration of a check by name
 - delete_check: Permanently delete a check by name
+- calibrate_check: Dry-run a draft check against a finished test run, saving
+  nothing — per-row verdicts plus the arguments the check actually received
 """
 
 import json
-from typing import Optional
+import uuid
+from typing import Any, Optional
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from src.error_handling import format_tool_error
 from src.okareo_client import organization_scoped
 from src.okareo_client import get_okareo_client
+from src.okareo_client import okareo_api_request
 
 
 def _get_attr(obj, attr, default=None):
@@ -85,6 +91,113 @@ _SHARED_NOTE = (
     "Checks are shared across every project in your organization, not private to the project you are working in."
 )
 
+# The backend caps a calibration run at its own wall clock (600s) and answers
+# 504 when it is exceeded. The client waits longer on purpose so the server's
+# 504 always wins the race — otherwise the caller sees a transport error and
+# cannot tell a slow judge from a dead route. Keep the two numbers coupled.
+#
+# 720, not 630: the server tests its wall clock *between* rows, never inside
+# one, so a row that starts at 599s runs to completion before the 504 is
+# raised. The worst-case row is one judge call plus its retry — the judge
+# retries once when the first completion does not parse to a score — each
+# bounded by the backend's LLM_TIMEOUT (30s by default). That puts the server's
+# own answer as late as ~660s, and the margin covers it with room to spare.
+_CALIBRATE_TIMEOUT_SECONDS = 720
+
+# Mirrors CheckCalibrateRequest.name's max_length on the route. The reserved-
+# name rule that route also applies is deliberately not mirrored — see
+# specs/042-calibrate-check/data-model.md.
+_CALIBRATE_NAME_MAX_CHARS = 200
+
+_CALIBRATE_NEXT_STEP = (
+    "Nothing was saved. When the verdicts look right, create the check with "
+    "create_or_update_check, which needs name, description, check_type, "
+    "output_type, and the same prompt_template or code_contents — plus "
+    "is_audio for an audio draft."
+)
+
+# inspect_only runs no judge, so there are no verdicts to look right. The next
+# step is a real calibration, not a save.
+_CALIBRATE_INSPECT_NEXT_STEP = (
+    "Nothing was saved and no judge ran, so there are no verdicts. Read the "
+    "arguments to confirm the variables the draft depends on are populated, "
+    "then calibrate the same draft again with inspect_only=false to score the "
+    "rows."
+)
+
+# Two unrelated failures share the 422 on this route. A draft-shaped 422 (a bad
+# placeholder, code that fails validation) means rewrite the draft. These two
+# phrases come from TestRunLookup.load_rescorable and mean the opposite: the
+# draft is fine and the Test Run is not scoreable — it has not finished, or it
+# is a type rescore does not handle.
+_RUN_INELIGIBLE_422_PHRASES = (
+    "is not re-evaluatable while status is",
+    "has unsupported type",
+)
+
+
+def _calibration_refusal(error: httpx.HTTPStatusError) -> str:
+    """Map a non-2xx calibration response onto guidance the agent can act on."""
+    status = error.response.status_code
+    try:
+        body = error.response.json()
+    except Exception:
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if detail is not None and not isinstance(detail, str):
+        detail = json.dumps(detail, default=str)
+
+    if status == 422:
+        if detail and any(
+            phrase in detail for phrase in _RUN_INELIGIBLE_422_PHRASES
+        ):
+            # The Test Run is the problem, not the draft. Telling the agent to
+            # rewrite a draft that is already correct is the one piece of
+            # advice that cannot help here.
+            return json.dumps({
+                "error": detail,
+                "retryable": True,
+                "suggestion": (
+                    "The draft was not rejected — the test run is not "
+                    "scoreable. If it is still running, wait for it to finish "
+                    "(list_test_runs reports its status) and calibrate the "
+                    "same draft again. If its type is unsupported, calibrate "
+                    "the same draft against a finished generation or "
+                    "multi-turn run instead. Do not rewrite the draft."
+                ),
+            })
+        # The draft was refused before a single row was evaluated, and the
+        # server's message names the offending placeholder or the code error.
+        # Relaying it verbatim IS the feedback loop this tool exists for.
+        return json.dumps({
+            "error": detail or "The draft check was rejected; no row was evaluated.",
+            "retryable": False,
+            "suggestion": (
+                "Fix the draft and calibrate again. Nothing was evaluated, "
+                "nothing was charged, and nothing was saved."
+            ),
+        })
+    if status == 404:
+        return json.dumps({
+            "error": detail or "Test run not found.",
+            "suggestion": (
+                "Call list_test_runs to find a finished run, then calibrate "
+                "against its id."
+            ),
+        })
+    if status == 504:
+        return json.dumps({
+            "error": detail or "Calibration exceeded the server's wall-clock limit.",
+            "retryable": True,
+            "suggestion": (
+                "Retry with inspect_only=true to read the arguments at no "
+                "cost, or calibrate against a run with fewer rows."
+            ),
+        })
+    return json.dumps({
+        "error": detail or f"Calibration failed with HTTP {status}.",
+    })
+
 
 def register_tools(mcp: FastMCP) -> None:
     """Register all check management tools with the FastMCP server."""
@@ -131,8 +244,9 @@ def register_tools(mcp: FastMCP) -> None:
                 and get_check report this as output_data_type in the server
                 vocabulary, where "bool" means pass_fail and "int" means score.
             prompt_template: Required when check_type="model". The judge
-                prompt. Inject the runtime data the judge needs with these
-                placeholders:
+                prompt. Write the criterion, rubric, or instructions in your
+                own words, and inject the runtime data the judge needs with
+                these placeholders — the complete set Okareo substitutes:
                 - {model_output}: the model output being evaluated. In a
                   multi-turn conversation this is ONLY the final assistant
                   message, not the full conversation.
@@ -151,8 +265,15 @@ def register_tools(mcp: FastMCP) -> None:
                   reconstructed from trace metadata. Only populated for traced
                   (ingested) conversations; for simulations and evaluations
                   use {message_history}.
-                The legacy {generation} placeholder is deprecated — use
-                {model_output} instead.
+                - {user_only_audio}: the user's audio only, for
+                  speaker-scoped audio checks. Audio checks only — empty on
+                  text evaluations.
+                Okareo rejects any placeholder that is not listed above. That
+                includes the legacy aliases {generation}, {input}, {result},
+                {audio_messages}, and {audio_output} — use {model_output},
+                {scenario_input}, {scenario_result}, and {user_only_audio}
+                instead. A rejected prompt fails on save and fails
+                calibrate_check.
             code_contents: Required when check_type="code" (output_type
                 "pass_fail" or "score" only). Python source defining
                 `class Check(CodeBasedCheck)` with a
@@ -556,5 +677,221 @@ def register_tools(mcp: FastMCP) -> None:
             "name": name,
             "message": f"Check '{name}' has been deleted.",
         })
+
+    @mcp.tool(
+        title="Calibrate Check",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,  # persists nothing: no check, no run, no scores
+            destructiveHint=False,
+            idempotentHint=False,  # judge verdicts are not reproducible
+            openWorldHint=True,  # every evaluated row makes a real LLM call
+        ),
+    )
+    def calibrate_check(
+        test_run_id: str,
+        check_type: str,
+        prompt_template: Optional[str] = None,
+        code_contents: Optional[str] = None,
+        output_type: Optional[str] = None,
+        is_audio: bool = False,
+        inspect_only: bool = False,
+        name: str = "draft_check",
+    ) -> str:
+        """Dry-run a draft check against a finished test run: per-row verdicts plus the exact arguments the check received, saving nothing.
+
+        Use this to tune a check before it exists. Write a draft prompt or
+        draft code, calibrate it against a run you already have, read the
+        per-row verdicts and the values that went in, revise, repeat. It
+        persists nothing — no check, no test run, no datapoints, no scores —
+        so iterating leaves no litter in the project. When the verdicts are
+        right, save the same draft with create_or_update_check.
+
+        What comes back, one entry per test datapoint (the row id the
+        evaluation results UI shows, so a verdict traces back to its
+        conversation):
+
+        - result: the score or verdict, the judge's explanation, check
+          metadata such as latency and cost, and the row's own error if it
+          failed. One row erroring does not fail the batch.
+        - arguments: what the check actually received for that row, whole —
+          values are never truncated, so a JSON one such as metadata still
+          parses. A model draft reports the full substituted variable set; a
+          code draft reports only the parameters its evaluate() signature
+          declares, as raw values.
+
+        Cost and bounds:
+
+        - Every evaluated row costs a real judge call, exactly like rescoring
+          that row. inspect_only=true returns the arguments alone and makes
+          zero judge calls — use it first to answer "is this variable even
+          populated for these rows", which is the usual reason a check scores
+          nonsense.
+        - At most 100 rows are evaluated per call. The response reports how
+          many rows were eligible and flags the cap when it applied, and the
+          same run returns the same rows every time, so two iterations are
+          comparable.
+
+        Placeholders for prompt_template — the complete set Okareo
+        substitutes at evaluation time:
+        - {model_output}: the model output being evaluated. In a multi-turn
+          conversation this is ONLY the final assistant message, not the full
+          conversation.
+        - {scenario_input}: the scenario input / source text.
+        - {scenario_result}: the reference/expected output.
+        - {model_input}: what was sent to the model (prompt or messages).
+        - {message_history}: the full multi-turn conversation — the
+          model_input messages plus the assistant's model_output.
+        - {tool_calls}: the tool/function calls the model just made.
+        - {tools}: the tool definitions/schema available to the model.
+        - {model_output_metadata}: metadata attached to the most recent model
+          output.
+        - {simulation_message_history}: full conversation history
+          reconstructed from trace metadata. Only populated for traced
+          (ingested) conversations; for simulations and evaluations use
+          {message_history}.
+        - {user_only_audio}: the user's audio only, for speaker-scoped audio
+          checks. Audio checks only — empty on text evaluations.
+        Okareo rejects any placeholder that is not listed above. That includes
+        the legacy aliases {generation}, {input}, {result}, {audio_messages},
+        and {audio_output} — use {model_output}, {scenario_input},
+        {scenario_result}, and {user_only_audio} instead. A rejected prompt
+        fails on save and fails calibrate_check.
+
+        Audio caveat: is_audio=true calibrates, but the row builder supplies
+        no audio for test-run rows, so every row comes back with no score and
+        the runtime's "No audio data provided" explanation — exactly what
+        re-scoring that run would do today. That is a known platform gap, not
+        a fault in your draft.
+
+        Args:
+            test_run_id: The finished test run whose rows to calibrate
+                against, as a UUID from list_test_runs. A run that is still
+                running, or in any non-terminal state, is refused.
+            check_type: "model" (an LLM judge driven by prompt_template) or
+                "code" (a deterministic Python class in code_contents).
+                Supply exactly one of the two — a draft carrying both is
+                refused here, before any request is sent.
+            prompt_template: Required when check_type="model". The judge
+                prompt, in the same shape create_or_update_check takes.
+            code_contents: Required when check_type="code". Python source in
+                the same shape create_or_update_check takes; see
+                get_templates("check_code").
+            output_type: Required when check_type="model": "pass_fail",
+                "score", or "analysis". Not sent for code drafts — the server
+                infers a code check's type from what evaluate() returns.
+            is_audio: Set true for an audio/voice draft. Only valid with
+                check_type="model". See the audio caveat above.
+            inspect_only: True returns the arguments for every row and runs
+                no judge at all, at no cost.
+            name: Name for the draft, at most 200 characters. It labels the
+                returned result column only; nothing is created under it.
+        """
+        if check_type not in ("model", "code"):
+            return json.dumps({
+                "error": "check_type must be 'model' or 'code'.",
+            })
+
+        if prompt_template and code_contents:
+            return json.dumps({
+                "error": (
+                    "Supply exactly one of prompt_template or code_contents, "
+                    "never both. A draft carrying both is ambiguous about "
+                    "which kind of check it is, and Okareo refuses it."
+                ),
+            })
+
+        if check_type == "model" and not prompt_template:
+            return json.dumps({
+                "error": "prompt_template is required for model-based checks.",
+            })
+
+        if check_type == "code" and not code_contents:
+            return json.dumps({
+                "error": "code_contents is required for code-based checks.",
+            })
+
+        if check_type == "model" and output_type not in (
+            "pass_fail",
+            "score",
+            "analysis",
+        ):
+            return json.dumps({
+                "error": (
+                    "output_type must be 'pass_fail', 'score', or 'analysis' "
+                    "for model-based checks. Without it every row errors "
+                    "server-side."
+                ),
+            })
+
+        if is_audio and check_type == "code":
+            return json.dumps({
+                "error": "Audio checks are only supported with check_type='model'.",
+            })
+
+        if not name or not name.strip():
+            return json.dumps({"error": "name cannot be empty."})
+
+        # Sent stripped, and bounded the way the route bounds it, so a name the
+        # server would refuse never costs a round-trip.
+        name = name.strip()
+        if len(name) > _CALIBRATE_NAME_MAX_CHARS:
+            return json.dumps({
+                "error": (
+                    f"name must be at most {_CALIBRATE_NAME_MAX_CHARS} "
+                    f"characters; got {len(name)}."
+                ),
+            })
+
+        try:
+            run_id = str(uuid.UUID(str(test_run_id).strip()))
+        except (ValueError, AttributeError, TypeError):
+            return json.dumps({
+                "error": (
+                    "test_run_id must be a test run's UUID, not a name. "
+                    "Call list_test_runs to find the run and use its id."
+                ),
+            })
+
+        if check_type == "model":
+            check_config: dict[str, Any] = {
+                "prompt_template": prompt_template,
+                "type": output_type,
+                "audio": is_audio,
+            }
+        else:
+            # No inferred "type": the response echoes check_config verbatim,
+            # and create_or_update_check sends none for code checks either.
+            check_config = {"code_contents": code_contents}
+
+        try:
+            okareo = get_okareo_client()
+        except Exception as e:
+            return format_tool_error(e)
+
+        try:
+            result = okareo_api_request(
+                okareo,
+                "post",
+                f"/v0/test_runs/{run_id}/calibrate_check",
+                json={
+                    "check_config": check_config,
+                    "check_type": "audio" if is_audio else check_type,
+                    "name": name,
+                    "inspect_only": inspect_only,
+                },
+                timeout=_CALIBRATE_TIMEOUT_SECONDS,
+            )
+        except httpx.HTTPStatusError as e:
+            return _calibration_refusal(e)
+        except Exception as e:
+            return format_tool_error(e)
+
+        payload: dict[str, Any] = (
+            dict(result) if isinstance(result, dict) else {"response": result}
+        )
+        payload["next_step"] = (
+            _CALIBRATE_INSPECT_NEXT_STEP if inspect_only else _CALIBRATE_NEXT_STEP
+        )
+        return json.dumps(payload, default=str)
 
     return None

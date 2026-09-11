@@ -30,6 +30,7 @@ REGISTERED_TOOLS = {
     "generate_check",
     "get_check",
     "delete_check",
+    "calibrate_check",
     # Simulations
     "create_or_update_target",
     "get_target",
@@ -129,6 +130,7 @@ def test_instructions_tool_names_valid():
         # Parameter names referenced in instructions (not tool names)
         "all_versions",
         "call_id",
+        "inspect_only",
     }
     tool_references = candidates - non_tool_patterns
 

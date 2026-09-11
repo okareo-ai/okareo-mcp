@@ -2,13 +2,15 @@
 
 A Target Validation Check evaluates whether a target's output matches or aligns with the expected result from the scenario. Use this to compare actual target output against reference answers.
 
+Two kinds of slot appear below and they are not interchangeable. `<angle>` slots are yours: replace them with your own text before saving. `{brace}` placeholders are Okareo's: leave them exactly as written and Okareo substitutes the row's data at evaluation time.
+
 ## Prompt Structure
 
 ```
 You are an expert evaluator. Your task is to determine whether the actual output from the AI system aligns with the expected result.
 
 ## Expected Result
-{expected_result}
+{scenario_result}
 
 ## Actual Output
 {model_output}
@@ -17,7 +19,7 @@ You are an expert evaluator. Your task is to determine whether the actual output
 {scenario_input}
 
 ## Evaluation Criteria
-{validation_criteria}
+<validation_criteria>
 
 ## Instructions
 Compare the actual output against the expected result using the criteria above. Return ONLY "true" if the output acceptably matches the expected result, or "false" if it does not.
@@ -27,12 +29,44 @@ Do not explain your reasoning. Return only "true" or "false".
 
 ## Placeholders
 
+### Fill these in yourself
+
+Replace each slot with your own text before saving the check. Okareo does not substitute these — a slot left unreplaced reaches the judge as literal text.
+
+| Slot | What to write |
+|------|---------------|
+| `<validation_criteria>` | How strictly to compare (semantic vs exact) |
+
+### Runtime placeholders
+
+Okareo substitutes these with the row's data at evaluation time. Leave them exactly as written.
+
 | Placeholder | Description |
 |-------------|-------------|
-| `{expected_result}` | The reference/expected result from the scenario |
+| `{scenario_result}` | The reference/expected result from the scenario |
 | `{model_output}` | The target's actual response |
 | `{scenario_input}` | The original user input |
-| `{validation_criteria}` | How strictly to compare (semantic vs exact) |
+
+### All Available Placeholders
+
+The prompt template above uses the most common placeholders. The full set available for model-based checks:
+
+| Placeholder | Description |
+|-------------|-------------|
+| `{model_output}` | The model output being evaluated. In a multi-turn conversation this is ONLY the final assistant message, not the full conversation |
+| `{scenario_input}` | The scenario input / source text |
+| `{scenario_result}` | The reference/expected output from the scenario |
+| `{model_input}` | What was sent to the model (prompt or messages) |
+| `{message_history}` | The full multi-turn conversation — the model_input messages plus the assistant's model_output. Use this when the check must judge the whole conversation |
+| `{tool_calls}` | The tool/function calls the model just made |
+| `{tools}` | The tool definitions/schema available to the model |
+| `{model_output_metadata}` | Metadata attached to the most recent model output |
+| `{simulation_message_history}` | Full conversation history reconstructed from trace metadata. Only populated for traced (ingested) conversations; for simulations and evaluations use `{message_history}` |
+| `{user_only_audio}` | The user's audio only, for speaker-scoped audio checks. Audio checks only — empty on text evaluations |
+
+### Rejected placeholders
+
+> Okareo rejects any placeholder that is not listed above. That includes the legacy aliases `{generation}`, `{input}`, `{result}`, `{audio_messages}`, and `{audio_output}` — use `{model_output}`, `{scenario_input}`, `{scenario_result}`, and `{user_only_audio}` instead. A rejected prompt fails on save and fails `calibrate_check`.
 
 ## Example Validation Criteria
 
@@ -65,6 +99,8 @@ of the core points.
 ## Usage in Okareo
 
 This check is particularly useful for regression testing — verifying that model updates don't degrade output quality on known-good test cases. Register as a Check and include in evaluation runs alongside your scenarios.
+
+The section below is a DIFFERENT namespace: those variables are substituted into a Target's configuration, not into a check prompt. Do not mix them into the judge prompt above.
 
 ## Substitution Variables
 

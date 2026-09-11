@@ -646,6 +646,7 @@ def okareo_api_request(
     *,
     json: object | None = None,
     params: dict | None = None,
+    timeout: float | None = None,
 ):
     """Issue an authenticated request to the Okareo API via the SDK's client.
 
@@ -661,6 +662,12 @@ def okareo_api_request(
         path: API path beginning with "/v0/".
         json: Optional JSON request body.
         params: Optional query parameters.
+        timeout: Optional per-request timeout, in seconds. Omitted by
+            default so the client's own configuration decides — note that
+            ``Okareo.__init__`` never forwards its ``timeout`` to the
+            generated ``Client``, whose ``_timeout`` therefore stays
+            ``None``, which httpx reads as *no timeout at all*. A tool
+            calling a long-running route must pass one explicitly.
 
     Returns:
         The parsed JSON response body, or ``None`` for an empty 2xx response.
@@ -669,12 +676,16 @@ def okareo_api_request(
         httpx.HTTPStatusError: on a non-2xx response.
     """
     httpx_client = okareo.client.get_httpx_client()
+    # Passing timeout=None would mean "wait forever", not "use the default",
+    # so the argument is only supplied when the caller actually set one.
+    timeout_kwargs = {} if timeout is None else {"timeout": timeout}
     response = httpx_client.request(
         method,
         path,
         json=json,
         params={k: v for k, v in (params or {}).items() if v is not None},
         headers={"api-key": okareo.api_key},
+        **timeout_kwargs,
     )
     response.raise_for_status()
     if not response.content:
