@@ -279,6 +279,55 @@ class TestRunTestToolHandoff:
 
 
 # ---------------------------------------------------------------------------
+# 041: per-row checks on get_test_run_results data points
+# ---------------------------------------------------------------------------
+
+
+class TestDataPointChecks:
+    """Each data point's own `checks` carries that row's Check values and the
+    judge's explanation, correctly paired. The run-level scores_by_row has no
+    key to join on, so this field is the only reliable per-row source."""
+
+    CHECKS = {
+        "behavior_adherence": True,
+        "behavior_adherence__explanation": "The agent held the line.",
+    }
+
+    def _mock_okareo(self):
+        mock_okareo = MagicMock()
+        mock_okareo.find_test_data_points.return_value = [
+            SimpleNamespace(
+                id="dp-1", test_id="dp-1", metric_value={"score": 1},
+                scenario_input="a", scenario_result="b", checks=self.CHECKS,
+            ),
+        ]
+        return mock_okareo
+
+    def _fetch(self, **kwargs):
+        tools = _tests_tools()
+        with patch("src.tools.tests.get_okareo_client", return_value=self._mock_okareo()), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
+             patch("src.tools.tests.find_test_runs", return_value=[{
+                 "id": "run-abc",
+                 "name": "my-run",
+                 "model_metrics": {},
+             }]):
+            return json.loads(tools["get_test_run_results"](
+                test_run_id="run-abc", **kwargs,
+            ))
+
+    def test_checks_included_with_transcripts(self):
+        out = self._fetch(include_transcripts=True)
+        assert out["data_points"][0]["checks"] == self.CHECKS
+
+    def test_checks_absent_by_default(self):
+        # The default response stays lean — explanations are the bulk of a
+        # judged row, and scores are already in the run-level summary.
+        out = self._fetch()
+        assert "checks" not in out["data_points"][0]
+
+
+# ---------------------------------------------------------------------------
 # 034: analytics annotations for get_test_run_results / transcript
 # ---------------------------------------------------------------------------
 

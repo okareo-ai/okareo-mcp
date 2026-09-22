@@ -686,8 +686,9 @@ def register_tools(mcp: FastMCP) -> None:
             test_run_id: The UUID of the test run. Takes precedence over name.
             name: The name of the test run. Returns the most recent match.
             include_transcripts: Include full model_input and model_result in
-                each data point. Defaults to False (scores only). Set True for
-                full conversation transcripts.
+                each data point, plus the data point's own `checks` — its Check
+                values and judge explanations, correctly paired to that row.
+                Defaults to False (scores only).
             limit: Maximum number of data points to return. 0 (default) returns
                 all data points. Use with offset for pagination.
             offset: Number of data points to skip. Defaults to 0.
@@ -900,6 +901,11 @@ def register_tools(mcp: FastMCP) -> None:
                     "error_message": _get_attr(dp, "error_message"),
                 }
                 if include_transcripts:
+                    # The row's own Check results: values plus the judge's
+                    # explanation, correctly attached to this conversation.
+                    # The run-level scores_by_row carries no explanations and
+                    # no key to join on — this is the per-row source of truth.
+                    entry["checks"] = _serialize_value(_get_attr(dp, "checks"))
                     entry["model_input"] = _serialize_value(
                         _get_attr(dp, "model_input")
                     )
