@@ -494,10 +494,11 @@ def register_tools(mcp: FastMCP) -> None:
 
         result = []
         for s in scenarios:
+            # No project_id per row: it is identical on every one and the
+            # response envelope already names the project (FR-023).
             result.append({
                 "name": _get_attr(s, "name", ""),
                 "id": str(_get_attr(s, "scenario_id", "")),
-                "project_id": str(_get_attr(s, "project_id", "")),
                 "tags": _get_attr(s, "tags", []) or [],
                 "row_count": _get_attr(s, "scenario_count", 0),
                 "created_date": str(_get_attr(s, "time_created", "")),

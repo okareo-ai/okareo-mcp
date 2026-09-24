@@ -1,6 +1,6 @@
 [project]
 name = "okareo-mcp"
-version = "0.0.51"
+version = "0.0.52"
 description = "Okareo MCP server for AI model evaluation"
 readme = "README.md"
 license = "Apache-2.0"
@@ -19,7 +19,7 @@ classifiers = [
 ]
 dependencies = [
     "mcp[cli]>=1.27",
-    "okareo>=0.0.146,<0.0.147",
+    "okareo>=0.0.156,<0.0.157",
     "httpx",
     "PyJWT[crypto]>=2.9",
     "python-dotenv>=1.0",

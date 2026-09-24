@@ -51,7 +51,7 @@ TEMPLATE_DESCRIPTIONS = {
     "driver_voice_extension_prompt": "Template for extending a Driver persona with voice-specific interaction behaviors.",
     "analysis_check_prompt": "Template for an analysis check that returns qualitative written feedback instead of a score or pass/fail.",
     "custom_endpoint_streaming": "SSE streaming configuration for custom endpoint targets — stop conditions, select filters, and common patterns.",
-    "voice_augmentations": "Voice simulation augmentations — the five strategies (cap, directed_speech, secondary_speaker, backchannel, barge_in), composable noise add-on, composition rule, per-field bounds, and copy-paste examples.",
+    "voice_augmentations": "Voice simulation augmentations — the six strategies (cap, directed_speech, secondary_speaker, backchannel, barge_in, dropout), composable noise add-on, composition rule, start_at_turn, accepted spellings, per-field bounds, and copy-paste examples.",
 }
 
 

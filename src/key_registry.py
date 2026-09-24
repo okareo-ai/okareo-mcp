@@ -12,7 +12,6 @@ _SUPPORTED_PROVIDERS: set[str] = {
     "generation",
     "cohere",
     "openai",
-    "openai_assistant",
     "pinecone",
     "qdrant",
     "custom",

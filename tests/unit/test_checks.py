@@ -548,10 +548,6 @@ class TestCheckVersioningAndTags:
         result = json.loads(tests_tools["list_checks"](all_versions=True))
 
         mock_okareo.get_all_checks.assert_called_once_with(all_versions=True)
-        all_entries = [
-            c
-            for entries in result["checks_by_category"].values()
-            for c in entries
-        ] + result["uncategorized"]
-        versions = sorted(c["version"] for c in all_entries)
+        # 043 FR-024: categories carry names, entries live once in `checks`.
+        versions = sorted(c["version"] for c in result["checks"])
         assert versions == [1, 2]

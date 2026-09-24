@@ -26,6 +26,7 @@ from mcp.types import ToolAnnotations
 from src.analytics_context import annotate
 from src.error_handling import ArtifactNotInProject, format_tool_error
 from src.okareo_client import (
+    resolve_run_provenance,
     PROJECT_PARAM_DESC,
     find_test_runs,
     get_okareo_client,
@@ -35,6 +36,13 @@ from src.okareo_client import (
     project_scoped,
     resolve_artifact_by_name,
     resolve_project,
+)
+from src.run_config import resolve_run_config
+from src.response_depth import (
+    DEPTHS_LISTING,
+    DETAILED,
+    page_window,
+    validate_depth,
 )
 
 
@@ -567,6 +575,51 @@ def _build_handoff_response(
     if based_on_run_id:
         response["based_on_run_id"] = based_on_run_id
     return response
+
+
+# Detailed simulation listings were capped at 5, which is low enough that a
+# copilot routes around the comparison path and opens each run instead --
+# the most expensive call in the surface. Raising it costs response size
+# linearly and nothing upstream: `limit` is a client-side slice taken after
+# the whole list has already crossed the wire (019 R6).
+# run_simulation's own defaults. Inheritance compares against these to tell a
+# value the caller supplied from one they simply left alone -- the signature
+# cannot use None for these without changing the tool's published schema.
+_SIM_DEFAULT_REPEATS = 1
+_SIM_DEFAULT_MAX_TURNS = 5
+_SIM_DEFAULT_FIRST_TURN = "target"
+
+
+def _run_check_names(run) -> list:
+    """The check names a run was evaluated with, from its aggregate metrics.
+
+    `check_ids` rides on `model_metrics` and survives `return_model_metrics=False`,
+    so this costs nothing beyond the fetch already being made (research R9).
+    """
+    metrics = (
+        run.get("model_metrics") if isinstance(run, dict)
+        else _get_attr(run, "model_metrics")
+    )
+    metrics = _serialize_value(metrics)
+    if not isinstance(metrics, dict):
+        return []
+    names = []
+    for entry in metrics.get("check_ids") or []:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if name:
+            names.append(str(name))
+    return names
+
+
+_DETAILED_SIM_CAP = 20
+
+
+def _filter_by_name(entries: list[dict], name_contains: Optional[str]) -> list[dict]:
+    """Case-insensitive substring filter on each entry's ``name``."""
+    if not name_contains:
+        return entries
+    needle = name_contains.lower()
+    return [e for e in entries if needle in str(e.get("name", "")).lower()]
 
 
 _SHARED_NOTE = (
@@ -1110,6 +1163,14 @@ def register_tools(mcp: FastMCP) -> None:
                             raw = models_dict[ttype]
                             target_config = _serialize_value(raw) if raw else {}
                             break
+                    else:
+                        # A type this tool does not shape, such as the retired
+                        # openai_assistant, is shown as stored rather than as
+                        # a null type that reads like a missing Target.
+                        for ttype, raw in models_dict.items():
+                            target_type = ttype
+                            target_config = _serialize_value(raw) if raw else {}
+                            break
 
                 if target_type == "custom_endpoint":
                     # Build a flat envelope whose keys mirror
@@ -1172,16 +1233,37 @@ def register_tools(mcp: FastMCP) -> None:
     )
     @project_scoped
     def list_targets(
+        limit: int = 20,
+        offset: int = 0,
+        name_contains: Optional[str] = None,
+        detail_level: str = "summary",
         project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
-        """Browse the organization's simulation targets.
+        """Find a simulation target.
 
-        Targets are shared across the organization (like checks and drivers):
-        this lists every simulation target (voice and custom_endpoint types)
-        created via create_or_update_target, whatever project you work in.
-        Does not include generation models registered via
-        register_generation_model — use list_generation_models for those.
+        Lists every simulation target (voice and custom_endpoint types) created
+        via create_or_update_target. Does not include generation models
+        registered via register_generation_model — use list_generation_models
+        for those.
+
+        Bounded by default and filterable by name. Two depths:
+
+        - "summary" (default): target id, name, type, and creation date.
+        - "detailed": adds tags and a short configuration summary.
+
+        Use get_target for one target's complete configuration.
+
+        Args:
+            limit: Maximum number of targets to return. Defaults to 20. Set to
+                0 to return all.
+            offset: Number of targets to skip. Defaults to 0.
+            name_contains: Case-insensitive substring filter on the target name.
+            detail_level: "summary" (default) or "detailed".
         """
+        invalid = validate_depth(detail_level, DEPTHS_LISTING)
+        if invalid is not None:
+            return invalid
+        detailed = detail_level == DETAILED
         from okareo_api_client.api.default import (
             get_all_models_under_test_v0_models_under_test_get,
         )
@@ -1230,20 +1312,32 @@ def register_tools(mcp: FastMCP) -> None:
                 continue
 
             target_type = next(iter(matched_types))
-            if isinstance(m, dict):
-                result.append({
-                    "target_id": m.get("id", ""),
-                    "name": m.get("name", ""),
-                    "type": target_type,
-                    "time_created": str(m.get("time_created", "")),
-                })
-            else:
-                result.append({
-                    "target_id": _get_attr(m, "id", ""),
-                    "name": _get_attr(m, "name", ""),
-                    "type": target_type,
-                    "time_created": str(_get_attr(m, "time_created", "")),
-                })
+
+            def _field(obj, key, default=None):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return _get_attr(obj, key, default)
+
+            entry = {
+                "target_id": _field(m, "id", ""),
+                "name": _field(m, "name", ""),
+                "type": target_type,
+                "time_created": str(_field(m, "time_created", "")),
+            }
+            if detailed:
+                tags = _field(m, "tags") or []
+                if tags:
+                    entry["tags"] = list(tags)
+                config = models_dict.get(target_type)
+                if isinstance(config, dict):
+                    summary = {
+                        k: config[k]
+                        for k in ("max_parallel_requests", "model_id", "voice")
+                        if config.get(k) not in (None, "", {})
+                    }
+                    if summary:
+                        entry["config"] = summary
+            result.append(entry)
 
         if not result:
             return json.dumps({
@@ -1252,7 +1346,33 @@ def register_tools(mcp: FastMCP) -> None:
                 "message": "No simulation targets found. Use create_or_update_target to create one.",
             })
 
-        return json.dumps({"targets": result, "count": len(result)}, default=str)
+        matched = _filter_by_name(result, name_contains)
+        total_count = len(matched)
+        start, stop, has_more = page_window(total_count, limit, offset)
+        page = matched[start:stop]
+
+        response = {
+            "targets": page,
+            "count": len(page),
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+            "detail_level": detail_level,
+        }
+        if name_contains:
+            response["name_contains"] = name_contains
+            if not matched:
+                response["message"] = (
+                    f"No target name contains {name_contains!r}. "
+                    f"{len(result)} target(s) exist; omit name_contains to see them."
+                )
+        if has_more:
+            response["next_step"] = (
+                f"list_targets(limit={limit}, offset={offset + limit}, "
+                f"detail_level='{detail_level}')"
+            )
+        return json.dumps(response, default=str)
 
     @mcp.tool(
         title="Delete Target",
@@ -1617,13 +1737,38 @@ def register_tools(mcp: FastMCP) -> None:
         ),
     )
     @organization_scoped(_SHARED_NOTE)
-    def list_drivers() -> str:
-        """See what driver personas are available in your organization.
+    def list_drivers(
+        limit: int = 20,
+        offset: int = 0,
+        name_contains: Optional[str] = None,
+        detail_level: str = "summary",
+    ) -> str:
+        """Find a driver persona in your organization.
 
-        Returns all Drivers with their names, IDs, model, and temperature.
-        Drivers are shared across every project, so this listing does not
-        resolve or filter by project (FR-027).
+        Drivers are shared across every project, so this list grows with the
+        whole organization's history rather than one project's — it is bounded
+        by default and filterable by name.
+
+        Two depths:
+
+        - "summary" (default): driver id, name, model, and creation date.
+        - "detailed": adds temperature and, for voice drivers, their voice
+          settings.
+
+        Voice attributes are omitted entirely for text drivers rather than
+        returned empty.
+
+        Args:
+            limit: Maximum number of drivers to return. Defaults to 20. Set to
+                0 to return all.
+            offset: Number of drivers to skip. Defaults to 0.
+            name_contains: Case-insensitive substring filter on the driver name.
+            detail_level: "summary" (default) or "detailed".
         """
+        invalid = validate_depth(detail_level, DEPTHS_LISTING)
+        if invalid is not None:
+            return invalid
+        detailed = detail_level == DETAILED
         from okareo_api_client.api.default import (
             get_all_drivers_v0_drivers_get,
         )
@@ -1649,34 +1794,60 @@ def register_tools(mcp: FastMCP) -> None:
                 "message": "No drivers found in this organization.",
             })
 
+        def _field(d, key, default=None):
+            if isinstance(d, dict):
+                return d.get(key, default)
+            return _get_attr(d, key, default)
+
         result = []
         for d in drivers:
-            if isinstance(d, dict):
-                result.append({
-                    "driver_id": d.get("id", ""),
-                    "name": d.get("name", ""),
-                    "model_id": d.get("model_id"),
-                    "temperature": d.get("temperature", 0.6),
-                    "time_created": d.get("time_created", ""),
-                    "voice_instructions": d.get("voice_instructions"),
-                    "voice_profile": d.get("voice_profile"),
-                    "voice": d.get("voice"),
-                    "language": d.get("language"),
-                })
-            else:
-                result.append({
-                    "driver_id": _get_attr(d, "id", ""),
-                    "name": _get_attr(d, "name", ""),
-                    "model_id": _get_attr(d, "model_id"),
-                    "temperature": _get_attr(d, "temperature", 0.6),
-                    "time_created": str(_get_attr(d, "time_created", "")),
-                    "voice_instructions": _get_attr(d, "voice_instructions"),
-                    "voice_profile": _get_attr(d, "voice_profile"),
-                    "voice": _get_attr(d, "voice"),
-                    "language": _get_attr(d, "language"),
-                })
+            entry = {
+                "driver_id": _field(d, "id", ""),
+                "name": _field(d, "name", ""),
+                "model_id": _field(d, "model_id"),
+                "time_created": str(_field(d, "time_created", "")),
+            }
+            if detailed:
+                entry["temperature"] = _field(d, "temperature", 0.6)
+            # A text driver carries four voice keys that are always null.
+            # Omitting them is the difference between describing a driver and
+            # padding it (FR-015).
+            for key in (
+                "voice", "voice_profile", "voice_instructions", "language",
+            ):
+                value = _field(d, key)
+                if value not in (None, ""):
+                    entry[key] = value
+            result.append(entry)
 
-        return json.dumps({"drivers": result, "count": len(result)}, default=str)
+        matched = _filter_by_name(result, name_contains)
+        total_count = len(matched)
+        start, stop, has_more = page_window(total_count, limit, offset)
+        page = matched[start:stop]
+
+        response = {
+            "drivers": page,
+            "count": len(page),
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+            "detail_level": detail_level,
+        }
+        if name_contains:
+            response["name_contains"] = name_contains
+            if not matched:
+                response["message"] = (
+                    f"No driver name contains {name_contains!r}. "
+                    f"{len(result)} driver(s) exist in this organization; "
+                    "omit name_contains to see them."
+                )
+        if has_more:
+            response["next_step"] = (
+                f"list_drivers(limit={limit}, offset={offset + limit}, "
+                f"detail_level='{detail_level}')"
+            )
+        return json.dumps(response, default=str)
 
     @mcp.tool(
         title="List Driver Voices",
@@ -1766,25 +1937,35 @@ def register_tools(mcp: FastMCP) -> None:
         on its own. In both cases, poll get_test_run_results with the returned
         test_run_id for scores, and get_conversation_transcript for transcripts.
 
-        To rerun a previous simulation — keeping its configuration but changing one or
-        more parameters — pass based_on_run_id with the original run's ID and supply
-        only the values you want to override. If scenario_name or target_name are
-        omitted and based_on_run_id is provided, they will be resolved from the
-        original run.
+        **To rerun a previous simulation**, pass based_on_run_id with the original
+        run's ID and supply only the values you want to change. Everything the
+        original recorded carries over: scenario, target, driver, checks,
+        stop_check, repeats, max_turns, first_turn, checks_at_every_turn,
+        turn_transition_time and — for voice runs — augmentation and
+        silence_timeout_ms. Any argument you pass overrides that one field and
+        leaves the rest inherited.
+
+        A parameter the original run never recorded falls to this tool's default
+        rather than being guessed at, and anything it recorded that this tool
+        cannot set is reported in `rerun_notes` rather than silently dropped.
+
+        Read a run's `rerun` block first (get_test_run_results) to see exactly
+        what will carry over.
 
         For custom_endpoint Targets: an exception raised during the run (for
         example the endpoint erroring mid-conversation) FAILS the run — it is
         reported as a failed simulation, not silently skipped.
 
         **Voice augmentations** — for voice Targets, the `augmentation` parameter
-        applies realistic acoustic and conversational effects. Six top-level keys:
-        `cap`, `directed_speech`, `secondary_speaker`, `backchannel`, `barge_in`,
-        plus the composable `noise`. **Composition rule**: at most one non-noise
-        strategy may be active, optionally combined with `noise`. Augmentations
-        apply only to voice Targets — calls against generation or custom_endpoint
-        Targets with an augmentation block are rejected. Field-level errors
-        (out-of-range probability, missing required field, swapped offsets, unknown
-        strategy) are returned by the MCP before any backend call.
+        applies realistic acoustic and conversational effects. Seven top-level
+        keys: `cap`, `directed_speech`, `secondary_speaker`, `backchannel`,
+        `barge_in`, `dropout`, plus the composable `noise`. **Composition rule**:
+        at most one non-noise strategy may be active, optionally combined with
+        `noise`. Augmentations apply only to voice Targets — calls against
+        generation or custom_endpoint Targets with an augmentation block are
+        rejected. Field-level errors (out-of-range value, missing required field,
+        swapped offsets, unknown strategy, or a setting Okareo would ignore) are
+        returned by the MCP before any call to Okareo.
 
         Strategy required / optional fields (numeric ranges in brackets):
           - cap: probability [0.0, 1.0] required. pause_ms [0, 10000] optional.
@@ -1799,8 +1980,31 @@ def register_tools(mcp: FastMCP) -> None:
             seed optional.
           - barge_in: prompt (non-empty string) required. probability [0.0, 1.0],
             min_offset_ms (>=0), max_offset_ms (>= min_offset_ms), seed optional.
+          - dropout: probability [0.0, 1.0] required — the chance, per caller
+            turn, that the caller says nothing for the whole turn, so the agent
+            hears dead air. seed optional.
           - noise: noise_profile (non-empty string) AND noise_snr_db (number)
             required. seed optional.
+
+        `start_at_turn` (int >= 1, default 1) is optional on directed_speech,
+        secondary_speaker, backchannel, barge_in and dropout, and not accepted by
+        cap or noise. It holds the strategy off until that caller turn: the
+        agent's greeting is turn 0 and the first caller turn is turn 1. It must
+        not exceed max_turns, or the strategy would never fire.
+
+        The SDK's spellings are accepted too: `profile` / `snr_db` for noise, and
+        `voice` / `prompt` / `reverb_preset` for secondary_speaker — but not both
+        spellings of one setting. Settings Okareo ignores are rejected by name,
+        including three the SDK publishes: noise.probability,
+        barge_in.replacement_text and barge_in.utterance.
+
+        A dropped turn leaves no message in the transcript;
+        `get_conversation_transcript` reports those turns as `dropped_turns`.
+
+        Two limits worth knowing: dropout, barge_in and backchannel only fire on
+        connections that support them (phone, SIP and WebRTC Targets) — OpenAI and
+        Deepgram realtime Targets run without them. And a `seed` makes every
+        repeat of the run fire on the same turns.
 
         For copy-paste examples and the full reference, call
         `get_templates(["voice_augmentations"])`.
@@ -1830,7 +2034,9 @@ def register_tools(mcp: FastMCP) -> None:
             repeats: Number of times to run each scenario row, default 1.
             max_turns: Maximum conversation turns per simulation, default 5.
             first_turn: Who speaks first — 'target' or 'driver', default 'target'.
-            based_on_run_id: ID of a previous simulation run to reuse parameters from.
+            based_on_run_id: ID of a previous simulation run to inherit the full
+                recorded configuration from; any other argument overrides that
+                one field.
                 Explicitly supplied values override the original run's parameters.
             augmentation: (voice Targets only) Voice augmentation block. See the
                 "Voice augmentations" section above for keys and ranges. An empty
@@ -1860,40 +2066,21 @@ def register_tools(mcp: FastMCP) -> None:
         from okareo.model_under_test import Simulation
         from src.voice_augmentation import (
             AugmentedSimulation,
-            validate_augmentation,
-            validate_composition,
+            preflight_augmentation,
         )
 
         # Treat empty augmentation block as no augmentation (FR-020).
         if isinstance(augmentation, dict) and not augmentation:
             augmentation = None
 
-        # === Augmentation preflight (FR-026: no network calls) ===
-        # Composition rule first (FR-018), then per-field validation (FR-021..023).
-        if augmentation is not None:
-            conflicts = validate_composition(augmentation)
-            if conflicts:
-                return json.dumps({
-                    "error": (
-                        f"Unsupported augmentation combination: "
-                        f"{', '.join(conflicts)}. "
-                        "Only noise + one other strategy is composable."
-                    ),
-                    "conflicting_strategies": conflicts,
-                })
-            aug_errors = validate_augmentation(augmentation)
-            if aug_errors:
-                primary = aug_errors[0]
-                payload = {
-                    "error": primary["error"],
-                    "field": primary.get("field"),
-                    "strategy": primary.get("strategy"),
-                }
-                if "known" in primary:
-                    payload["known"] = primary["known"]
-                if len(aug_errors) > 1:
-                    payload["additional_errors"] = aug_errors[1:]
-                return json.dumps(payload)
+        # Augmentation preflight, before any network call (023 FR-026). On a
+        # rerun, max_turns may still be inherited, so its bound waits for the
+        # second pass after inheritance.
+        aug_error = preflight_augmentation(
+            augmentation, None if based_on_run_id else max_turns
+        )
+        if aug_error:
+            return json.dumps(aug_error)
 
         try:
             okareo = get_okareo_client()
@@ -1934,14 +2121,17 @@ def register_tools(mcp: FastMCP) -> None:
         # Explains, in the error payload, which fields a rerun failed to carry
         # over — otherwise an unresolvable run reads as "you passed nothing".
         rerun_notes: list[str] = []
+        augmentation_inherited = False
 
         # If rerunning, fetch original run params as defaults
         if based_on_run_id:
             try:
+                # simulation_params and check_ids both survive the flag, and
+                # the row block was never needed here (research R12).
                 payload = GeneralFindPayload(
                     id=based_on_run_id,
                     project_id=project_id,
-                    return_model_metrics=True,
+                    return_model_metrics=False,
                 )
                 try:
                     runs = find_test_runs(okareo, payload)
@@ -2029,8 +2219,57 @@ def register_tools(mcp: FastMCP) -> None:
                                 resolved_driver_name = d["name"]
                                 break
 
+                # Everything else the original recorded. Until 043 US6 only the
+                # three names above were inherited while the docstring promised
+                # the configuration, so changing the driver silently reset
+                # max_turns to 5 and dropped stop_check, augmentation and the
+                # checks. A field the original did not record stays unset here
+                # rather than being claimed at its default (research R11a).
+                inherited = resolve_run_config(
+                    original, _run_check_names(original)
+                )
+                _p = inherited["params"]
+                if checks is None and _p.get("checks"):
+                    checks = list(_p["checks"])
+                if repeats == _SIM_DEFAULT_REPEATS and "repeats" in _p:
+                    repeats = _p["repeats"]
+                if max_turns == _SIM_DEFAULT_MAX_TURNS and "max_turns" in _p:
+                    max_turns = _p["max_turns"]
+                if first_turn == _SIM_DEFAULT_FIRST_TURN and "first_turn" in _p:
+                    first_turn = _p["first_turn"]
+                if stop_check is None and "stop_check" in _p:
+                    stop_check = _p["stop_check"]
+                if checks_at_every_turn is None and "checks_at_every_turn" in _p:
+                    checks_at_every_turn = _p["checks_at_every_turn"]
+                if turn_transition_time is None and "turn_transition_time" in _p:
+                    turn_transition_time = _p["turn_transition_time"]
+                if augmentation is None and "augmentation" in _p:
+                    augmentation = _p["augmentation"]
+                    augmentation_inherited = bool(augmentation)
+                if silence_timeout_ms is None and "silence_timeout_ms" in _p:
+                    silence_timeout_ms = _p["silence_timeout_ms"]
+
+                for entry in inherited["unavailable"]:
+                    rerun_notes.append(
+                        f"Run '{based_on_run_id}' recorded "
+                        f"{entry['field']}={entry['value']!r}, which "
+                        "run_simulation cannot set; the new run uses the "
+                        "default instead."
+                    )
+
             except Exception as e:
                 return format_tool_error(e)
+
+            # Second pass: only now are an inherited block and the effective
+            # max_turns known. An inherited block was never checked otherwise.
+            aug_error = preflight_augmentation(augmentation, max_turns)
+            if aug_error:
+                if augmentation_inherited:
+                    aug_error["error"] += (
+                        f" (inherited from run '{based_on_run_id}'; pass "
+                        "augmentation to override)"
+                    )
+                return json.dumps(aug_error)
 
         # Validate required fields after rerun resolution
         if not resolved_scenario_name:
@@ -2349,6 +2588,13 @@ def register_tools(mcp: FastMCP) -> None:
         }
         if resolved_driver_name:
             extra["driver"] = resolved_driver_name
+        if rerun_notes:
+            # FR-032: a field that could not be carried has to be reported on
+            # the successful path too. Reporting it only on failure is exactly
+            # the invisible drift this story exists to remove -- the run
+            # happens, and differs from its parent with nothing to say so.
+            extra["based_on_run_id"] = based_on_run_id
+            extra["rerun_notes"] = rerun_notes
         if default_check_applied:
             extra["default_check_applied"] = default_check_applied
             extra["default_check_note"] = (
@@ -2382,23 +2628,27 @@ def register_tools(mcp: FastMCP) -> None:
         target_name: Optional[str] = None,
         scenario_name: Optional[str] = None,
         limit: int = 10,
+        offset: int = 0,
         detail_level: str = "summary",
         project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
-        """List past simulation runs in the project.
+        """Find or compare simulation runs in the project, most recent first.
 
-        Returns simulation run names, IDs, timestamps, and status, sorted by
-        most recent first. Defaults to the 10 most recent runs in summary mode.
+        Two depths:
 
-        Use detail_level="detailed" to include aggregate model_metrics and
-        additional fields (limit is capped to 5 in detailed mode). Per-row
-        scores and explanations are not returned by either mode — use
-        get_test_run_results for those.
+        - "summary" (default): identity, status, conversation count, timings,
+          and what each run executed against (target, scenario, driver).
+        - "detailed": adds aggregate model_metrics and the provenance
+          identifiers, up to 20 runs at a time.
 
-        Use get_test_run_results with the returned test_run_id to retrieve
-        per-row scores (transcripts excluded by default). Then use
-        get_conversation_transcript with a scenario_index to inspect
-        individual conversation transcripts.
+        **To compare simulations, use detail_level="detailed" here** rather
+        than calling get_test_run_results for each run — one response carries
+        the aggregates and the provenance needed to tell whether two runs are
+        even comparable, without opening any of them.
+
+        Neither depth returns per-conversation scores or explanations. Use
+        get_test_run_results for those, then get_conversation_transcript with
+        a scenario_index for one conversation's transcript.
 
         Args:
             target_name: Optional filter — only show simulation runs using
@@ -2406,20 +2656,20 @@ def register_tools(mcp: FastMCP) -> None:
             scenario_name: Optional filter — only show simulation runs using
                 this scenario.
             limit: Maximum number of runs to return, sorted by most recent
-                first. Defaults to 10. Set to 0 to return all runs.
-            detail_level: "summary" (default) returns compact results without
-                model_metrics. "detailed" adds aggregate model_metrics
-                (mean_scores, percentile_scores, aggregate_*) and caps limit
-                to 5. Neither mode returns per-row scores.
+                first. Defaults to 10. Set to 0 to return all runs. In
+                "detailed" mode this is capped at 20.
+            offset: Number of runs to skip. Defaults to 0.
+            detail_level: "summary" (default) or "detailed".
         """
-        if detail_level not in ("summary", "detailed"):
-            return json.dumps({
-                "error": f"Invalid detail_level '{detail_level}'. "
-                "Valid values: summary, detailed.",
-            })
+        invalid = validate_depth(detail_level, DEPTHS_LISTING)
+        if invalid is not None:
+            return invalid
 
-        if detail_level == "detailed" and (limit > 5 or limit == 0):
-            limit = 5
+        detailed = detail_level == DETAILED
+        capped = False
+        if detailed and (limit > _DETAILED_SIM_CAP or limit == 0):
+            limit = _DETAILED_SIM_CAP
+            capped = True
         from okareo_api_client.api.default import (
             get_scenario_sets_v0_scenario_sets_get,
         )
@@ -2509,7 +2759,6 @@ def register_tools(mcp: FastMCP) -> None:
             })
 
         # Format results — runs may be raw dicts from the low-level API
-        detailed = detail_level == "detailed"
         result = []
         for run in runs:
             if isinstance(run, dict):
@@ -2521,12 +2770,12 @@ def register_tools(mcp: FastMCP) -> None:
                         "test_data_point_count", 0
                     ),
                     "start_time": run.get("start_time"),
-                    "app_link": run.get("app_link", ""),
                 }
                 if detailed:
                     entry["type"] = run.get("type", "")
                     entry["model_metrics"] = run.get("model_metrics")
                     entry["end_time"] = run.get("end_time")
+                    entry["app_link"] = run.get("app_link", "")
             else:
                 entry = {
                     "id": _get_attr(run, "id", ""),
@@ -2538,7 +2787,6 @@ def register_tools(mcp: FastMCP) -> None:
                     "start_time": str(
                         _get_attr(run, "start_time", "")
                     ),
-                    "app_link": _get_attr(run, "app_link", ""),
                 }
                 if detailed:
                     entry["type"] = _get_attr(run, "type", "")
@@ -2548,6 +2796,15 @@ def register_tools(mcp: FastMCP) -> None:
                     entry["end_time"] = str(
                         _get_attr(run, "end_time", "")
                     )
+                    entry["app_link"] = _get_attr(run, "app_link", "")
+
+            # Aggregates alone cannot qualify a comparison -- two runs are only
+            # comparable if they ran against the same things (FR-029).
+            entry.update(
+                resolve_run_provenance(
+                    okareo, run, project_id, include_ids=detailed
+                )
+            )
             result.append(entry)
 
         # Sort by start_time descending (most recent first)
@@ -2555,12 +2812,42 @@ def register_tools(mcp: FastMCP) -> None:
             key=lambda r: r.get("start_time") or "", reverse=True
         )
 
-        # Apply limit (0 = return all)
-        if limit > 0:
-            result = result[:limit]
+        total_count = len(result)
+        start, stop, has_more = page_window(total_count, limit, offset)
+        page = result[start:stop]
 
-        return json.dumps(
-            {"simulations": result, "count": len(result)}, default=str
-        )
+        response = {
+            "simulations": page,
+            "count": len(page),
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+            "detail_level": detail_level,
+        }
+        if capped:
+            response["note"] = (
+                f"detailed mode is capped at {_DETAILED_SIM_CAP} simulations per "
+                "call; use offset to page further."
+            )
+        if has_more:
+            response["next_step"] = (
+                f"list_simulations(limit={limit}, offset={offset + limit}, "
+                f"detail_level='{detail_level}')"
+            )
+        elif not detailed:
+            response["next_step"] = (
+                "list_simulations(detail_level='detailed') to compare aggregate "
+                "metrics across runs"
+            )
+        if page:
+            # FR-037: the rerun block only helps an agent that reaches it.
+            response["rerun_hint"] = (
+                "To re-run one of these with a change, call "
+                f"get_test_run_results(test_run_id='{page[0]['id']}') — its "
+                "`rerun` block carries the call and every value that carries "
+                "over."
+            )
+        return json.dumps(response, default=str)
 
     return None

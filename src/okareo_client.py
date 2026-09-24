@@ -94,8 +94,9 @@ _PROJECT_CACHE_TTL_SECONDS = 60.0
 
 
 def _reset_for_tests() -> None:
-    """Clear the project cache. Production code must not call this."""
+    """Clear every process-scoped cache. Production code must not call this."""
     _project_cache.clear()
+    _reset_name_caches_for_tests()
 
 
 def invalidate_projects_cache(okareo: Okareo) -> None:
@@ -691,3 +692,177 @@ def okareo_api_request(
     if not response.content:
         return None
     return response.json()
+
+
+# ---------------------------------------------------------------------------
+# Run provenance name resolution (043)
+# ---------------------------------------------------------------------------
+#
+# A test run records what it executed against as three bare identifiers --
+# mut_id, scenario_set_id, driver_id -- and no names. Resolving them per run
+# would cost a lookup per listed run (FR-027 forbids that), so each kind is
+# fetched in bulk once and cached as an id -> name map.
+#
+# These caches deliberately have NO invalidation hooks, unlike the project
+# cache above. The asymmetry is the point: a stale project list breaks
+# *resolution* -- a tool cannot act on a project the cache does not list --
+# whereas a miss here degrades to FR-028's documented fallback, the identifier
+# with the name omitted. A new target resolves within the TTL; a renamed one
+# shows its old name for at most the TTL. Neither breaks a call, so wiring
+# invalidation into every target/scenario/driver write path would be cost
+# without benefit (research R4).
+_ARTIFACT_NAME_CACHE_BOUND = 512
+_ARTIFACT_NAME_CACHE_TTL_SECONDS = 60.0
+
+_target_name_cache: dict[tuple, tuple[float, dict[str, str]]] = {}
+_scenario_name_cache: dict[tuple, tuple[float, dict[str, str]]] = {}
+_driver_name_cache: dict[tuple, tuple[float, dict[str, str]]] = {}
+
+
+def _reset_name_caches_for_tests() -> None:
+    """Clear the provenance name caches. Production code must not call this."""
+    _target_name_cache.clear()
+    _scenario_name_cache.clear()
+    _driver_name_cache.clear()
+
+
+def _artifact_attr(obj: Any, attr: str) -> Any:
+    """Read a field from an SDK model or the raw dict the API may return."""
+    if isinstance(obj, dict):
+        return obj.get(attr)
+    return getattr(obj, attr, None)
+
+
+def _cached_name_map(
+    cache: dict,
+    key: tuple,
+    fetch: Callable[[], Any],
+    id_attr: str,
+) -> dict[str, str]:
+    """Return a cached ``{id: name}`` map, refetching past the TTL.
+
+    A failed fetch returns an empty map and caches nothing, so the next call
+    retries rather than serving an empty map for the whole TTL. Callers treat
+    a missing id as "name unresolvable" either way (FR-028).
+    """
+    entry = cache.get(key)
+    if entry is not None and (
+        time.monotonic() - entry[0]
+    ) < _ARTIFACT_NAME_CACHE_TTL_SECONDS:
+        return entry[1]
+
+    try:
+        items = fetch()
+    except Exception:
+        return {}
+    if not items or isinstance(items, Exception):
+        return {}
+
+    names: dict[str, str] = {}
+    for item in items:
+        item_id = _artifact_attr(item, id_attr)
+        name = _artifact_attr(item, "name")
+        if item_id and name:
+            names[str(item_id)] = str(name)
+
+    if len(cache) >= _ARTIFACT_NAME_CACHE_BOUND:
+        cache.clear()
+    cache[key] = (time.monotonic(), names)
+    return names
+
+
+def get_targets_cached(okareo: Okareo, project_id: str) -> dict[str, str]:
+    """Return ``{mut_id: name}`` for the project's models under test."""
+    from okareo_api_client.api.default import (
+        get_all_models_under_test_v0_models_under_test_get,
+    )
+
+    base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
+    key = (_project_cache_scope(okareo), base_url, str(project_id))
+    return _cached_name_map(
+        _target_name_cache,
+        key,
+        lambda: get_all_models_under_test_v0_models_under_test_get.sync(
+            client=okareo.client, project_id=project_id, api_key=okareo.api_key,
+        ),
+        "id",
+    )
+
+
+def get_scenarios_cached(okareo: Okareo, project_id: str) -> dict[str, str]:
+    """Return ``{scenario_id: name}`` for the project's scenario sets."""
+    from okareo_api_client.api.default import (
+        get_scenario_sets_v0_scenario_sets_get,
+    )
+
+    base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
+    key = (_project_cache_scope(okareo), base_url, str(project_id))
+    return _cached_name_map(
+        _scenario_name_cache,
+        key,
+        lambda: get_scenario_sets_v0_scenario_sets_get.sync(
+            client=okareo.client, project_id=project_id, api_key=okareo.api_key,
+        ),
+        "scenario_id",
+    )
+
+
+def get_drivers_cached(okareo: Okareo) -> dict[str, str]:
+    """Return ``{driver_id: name}``. Drivers are organization-shared, so this
+    is not keyed on a project."""
+    from okareo_api_client.api.default import get_all_drivers_v0_drivers_get
+
+    base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
+    key = (_project_cache_scope(okareo), base_url)
+    return _cached_name_map(
+        _driver_name_cache,
+        key,
+        lambda: get_all_drivers_v0_drivers_get.sync(
+            client=okareo.client, api_key=okareo.api_key,
+        ),
+        "id",
+    )
+
+
+def resolve_run_provenance(
+    okareo: Okareo,
+    run: Any,
+    project_id: str,
+    include_ids: bool = True,
+) -> dict[str, dict[str, str]]:
+    """Name what a run executed against: its target, scenario, and driver.
+
+    A run carries these only as identifiers, and no listing surfaced them at
+    all before this feature -- so a caller could filter by target name but
+    never read one back, and two runs in a comparison could not be shown to be
+    comparable (FR-025, FR-029).
+
+    An identifier that will not resolve keeps its ``id`` and simply has no
+    ``name`` (FR-028); a listing must never fail because an artifact was
+    deleted or moved after the run finished.
+
+    Args:
+        include_ids: False drops the identifiers and keeps only names, which is
+            what listings do at ``summary`` depth (FR-026).
+    """
+    pairs = (
+        ("target", "mut_id", lambda: get_targets_cached(okareo, project_id)),
+        ("scenario", "scenario_set_id",
+         lambda: get_scenarios_cached(okareo, project_id)),
+        ("driver", "driver_id", lambda: get_drivers_cached(okareo)),
+    )
+
+    provenance: dict[str, dict[str, str]] = {}
+    for label, id_field, lookup in pairs:
+        raw_id = _artifact_attr(run, id_field)
+        if not raw_id:
+            continue
+        entry: dict[str, str] = {}
+        name = lookup().get(str(raw_id))
+        if name:
+            entry["name"] = name
+        if include_ids:
+            entry["id"] = str(raw_id)
+        if entry:
+            provenance[label] = entry
+    return provenance

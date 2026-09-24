@@ -173,7 +173,9 @@ class TestListScenariosResponseShape:
         # Required fields present
         assert scenario["name"] == "my-scenario"
         assert scenario["id"] == "uuid-1"
-        assert scenario["project_id"] == "proj-uuid-456"
+        # 043 FR-023: project_id was identical on every row while the response
+        # envelope already names the project.
+        assert "project_id" not in scenario
         assert scenario["tags"] == ["qa", "v1"]
         assert scenario["row_count"] == 5
         assert scenario["created_date"] == "2026-03-05T10:00:00Z"
@@ -800,3 +802,54 @@ class TestAnalyticsAnnotations:
             ))
         assert "error" in out
         assert "entity_id" not in annotations
+
+
+class TestScenarioListingRedundancy:
+    """043 US5 / FR-023: project_id was identical on every row while the
+    response envelope already named the project."""
+
+    def _call(self, n=3, **kwargs):
+        import json
+        from unittest.mock import MagicMock, patch
+        from okareo_api_client.api import default as pkg
+        from mcp.server.fastmcp import FastMCP
+        from src.tools.scenarios import register_tools
+        from src.okareo_client import ResolvedProject
+
+        mcp = FastMCP("test")
+        register_tools(mcp)
+        tools = {k: t.fn for k, t in mcp._tool_manager._tools.items()}
+
+        rows = [
+            _make_mock_scenario_response(
+                scenario_id=f"s-{i}",
+                name=f"scenario-{i}",
+                scenario_count=4,
+                project_id="p1",
+                tags=[],
+                time_created=f"2026-09-1{i}",
+            )
+            for i in range(n)
+        ]
+        mod = MagicMock()
+        mod.sync.return_value = rows
+        with patch("src.tools.scenarios.get_okareo_client", return_value=MagicMock()), \
+             patch("src.tools.scenarios.resolve_project",
+                   return_value=ResolvedProject(id="p1", name="Demos", basis="explicit")), \
+             patch.object(pkg, "get_scenario_sets_v0_scenario_sets_get", mod, create=True):
+            return json.loads(tools["list_scenarios"](**kwargs))
+
+    def test_project_id_is_not_repeated_on_every_row(self):
+        out = self._call(n=3)
+        for row in out["scenarios"]:
+            assert "project_id" not in row
+
+    def test_row_still_carries_what_finding_needs(self):
+        row = self._call(n=3)["scenarios"][0]
+        for key in ("name", "id", "tags", "row_count", "created_date"):
+            assert key in row
+
+    def test_row_count_lets_a_caller_judge_the_dive_in_cost(self):
+        # FR-021: get_scenario is unbounded by design, so the listing must say
+        # what opening one will cost.
+        assert self._call(n=3)["scenarios"][0]["row_count"] == 4

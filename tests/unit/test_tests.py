@@ -8,6 +8,8 @@ accessors, so both shapes must format without error or data loss.
 """
 
 import json
+
+import pytest
 from types import SimpleNamespace
 
 from src.tools.tests import _get_attr, _serialize_value
@@ -596,3 +598,181 @@ class TestListToolsSkipRowLevelMetrics:
         assert payload.return_model_metrics is False
         # Guards the reason it matters: unset id means an all-runs fetch.
         assert not getattr(payload, "id", None)
+
+
+class TestListTestRunsDepth:
+    """043 US2: the most frequent browsing call used to carry full aggregate
+    metrics for every run, whether or not the caller meant to compare anything.
+    """
+
+    def _tools(self):
+        from mcp.server.fastmcp import FastMCP
+        from src.tools.tests import register_tools
+
+        mcp = FastMCP("test")
+        register_tools(mcp)
+        return {n: t.fn for n, t in mcp._tool_manager._tools.items()}
+
+    def _run(self, i):
+        return {
+            "id": f"run-{i}",
+            "name": f"run {i}",
+            "type": "MULTI_TURN",
+            "status": "FINISHED",
+            "test_data_point_count": 6,
+            "start_time": f"2026-09-1{i}T00:00:00",
+            "end_time": f"2026-09-1{i}T01:00:00",
+            "app_link": "https://app.okareo.com/eval/x",
+            "mut_id": "m1",
+            "scenario_set_id": "s1",
+            "driver_id": "d1",
+            "model_metrics": {
+                "mean_scores": {"c": 0.5},
+                "percentile_scores": {},
+                "check_ids": [{"name": "c", "id": "c1", "version": 1}],
+            },
+        }
+
+    def _call(self, n=3, names=True, **kwargs):
+        import json
+        from unittest.mock import MagicMock, patch
+        from src.okareo_client import ResolvedProject, _reset_for_tests
+
+        _reset_for_tests()
+        okareo = MagicMock()
+        okareo.api_key = "k"
+        maps = (
+            ({"m1": "Pandora Voice"}, {"s1": "billing-cases"}, {"d1": "angry"})
+            if names else ({}, {}, {})
+        )
+        with patch("src.tools.tests.get_okareo_client", return_value=okareo), \
+             patch("src.tools.tests.resolve_project",
+                   return_value=ResolvedProject(id="p1", name="Demos", basis="explicit")), \
+             patch("src.tools.tests.find_test_runs",
+                   MagicMock(return_value=[self._run(i) for i in range(n)])), \
+             patch("src.okareo_client.get_targets_cached", return_value=maps[0]), \
+             patch("src.okareo_client.get_scenarios_cached", return_value=maps[1]), \
+             patch("src.okareo_client.get_drivers_cached", return_value=maps[2]):
+            return json.loads(self._tools()["list_test_runs"](**kwargs))
+
+    def test_summary_is_the_default_and_omits_metrics(self):
+        entry = self._call()["test_runs"][0]
+        assert "model_metrics" not in entry
+        assert entry["name"] and entry["status"] and entry["type"]
+
+    def test_summary_omits_the_derivable_link(self):
+        # FR-023: app_link is project_id + id concatenated, ~120 B a row.
+        assert "app_link" not in self._call()["test_runs"][0]
+
+    def test_detailed_restores_metrics_and_link(self):
+        entry = self._call(detail_level="detailed")["test_runs"][0]
+        assert entry["model_metrics"]["mean_scores"] == {"c": 0.5}
+        assert entry["app_link"]
+
+    def test_full_is_rejected_as_unimplemented(self):
+        out = self._call(detail_level="full")
+        assert "full" in out["error"]
+        assert "summary" in out["error"] and "detailed" in out["error"]
+
+    def test_provenance_names_at_summary(self):
+        entry = self._call()["test_runs"][0]
+        assert entry["target"]["name"] == "Pandora Voice"
+        assert entry["scenario"]["name"] == "billing-cases"
+        assert entry["driver"]["name"] == "angry"
+
+    def test_summary_carries_names_without_identifiers(self):
+        # FR-026: ~75 B a row instead of ~190 B.
+        entry = self._call()["test_runs"][0]
+        assert "id" not in entry["target"]
+
+    def test_detailed_adds_the_identifiers(self):
+        entry = self._call(detail_level="detailed")["test_runs"][0]
+        assert entry["target"]["id"] == "m1"
+
+    def test_unresolvable_provenance_does_not_fail_the_listing(self):
+        # FR-028: a deleted target must not break the listing.
+        out = self._call(names=False)
+        assert out["count"] == 3
+        # At summary the identifiers are not carried, so an unresolvable
+        # artifact leaves nothing to say and the key is simply absent.
+        assert "target" not in out["test_runs"][0]
+
+    def test_unresolvable_provenance_keeps_the_id_at_detailed(self):
+        out = self._call(names=False, detail_level="detailed")
+        assert out["test_runs"][0]["target"] == {"id": "m1"}
+
+    def test_pagination_envelope_present(self):
+        out = self._call(n=25, limit=10)
+        assert out["total_count"] == 25
+        assert out["has_more"] is True
+        assert "list_test_runs" in out["next_step"]
+
+    def test_offset_pages_through(self):
+        first = self._call(n=25, limit=10)["test_runs"]
+        second = self._call(n=25, limit=10, offset=10)["test_runs"]
+        assert {r["id"] for r in first}.isdisjoint({r["id"] for r in second})
+
+    def test_most_recent_first_at_both_depths(self):
+        for depth in ("summary", "detailed"):
+            runs = self._call(n=3, detail_level=depth)["test_runs"]
+            assert [r["start_time"] for r in runs] == sorted(
+                [r["start_time"] for r in runs], reverse=True
+            )
+
+
+class TestTranscriptDroppedTurns:
+    """044 US2: a dropped turn leaves no message, so the transcript has to say
+    which turns dropout silenced."""
+
+    @staticmethod
+    def _transcript(**dp_fields):
+        mock_okareo = MagicMock()
+        mock_okareo.find_test_data_points.return_value = [
+            SimpleNamespace(
+                id="dp-1", test_id="dp-1",
+                scenario_input="in", scenario_result="out",
+                model_input=[], model_result={}, metric_value={},
+                **dp_fields,
+            ),
+        ]
+        run = [{
+            "id": "run-1", "name": "r",
+            "model_metrics": {"scores_by_row": [{"test_id": "dp-1"}]},
+        }]
+        with patch("src.tools.tests.get_okareo_client", return_value=mock_okareo), \
+             patch("src.tools.tests.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default")), \
+             patch("src.tools.tests.find_test_runs", return_value=run):
+            tools = _tests_tools()
+            return json.loads(tools["get_conversation_transcript"](
+                test_run_id="run-1", test_id="dp-1",
+            ))
+
+    def test_transcript_reports_dropped_turns(self):
+        out = self._transcript(model_metadata={"dropped_turns": [3, 5]})
+        assert "error" not in out, out
+        assert out["dropped_turns"] == [3, 5]
+
+    def test_transcript_reads_dropped_turns_from_attrs_metadata(self):
+        meta = MagicMock()
+        meta.to_dict.return_value = {"dropped_turns": [2]}
+        out = self._transcript(model_metadata=meta)
+        assert out["dropped_turns"] == [2]
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"model_metadata": {"dropped_turns": []}},
+            {"model_metadata": {}},
+            {"model_metadata": None},
+            {},
+        ],
+    )
+    def test_transcript_omits_dropped_turns_when_empty(self, fields):
+        out = self._transcript(**fields)
+        assert "error" not in out, out
+        assert "dropped_turns" not in out
+
+    def test_transcript_keys_unchanged_without_dropout(self):
+        with_meta = self._transcript(model_metadata={"call_sid": "x"})
+        without = self._transcript()
+        assert set(with_meta) == set(without)

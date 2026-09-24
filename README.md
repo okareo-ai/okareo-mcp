@@ -165,8 +165,8 @@ Then use `"command": "okareo-mcp"` instead of `"command": "uvx"` with `"args": [
 |------|-------------|
 | `list_checks` | List available quality checks (built-in and custom) for evaluating model outputs |
 | `run_test` | Run a quality test that evaluates a model against a scenario using specified checks |
-| `list_test_runs` | List past test runs with optional filters (model, scenario, simulation-only) |
-| `get_test_run_results` | Load detailed per-row results of a test run or simulation by ID or name |
+| `list_test_runs` | Find past test runs, most recent first. `detail_level="summary"` (default) or `"detailed"` for aggregate metrics |
+| `get_test_run_results` | Load one page of a run's results by ID or name. `detail_level="summary"` (default) / `"detailed"` (per-check outcomes + explanations) / `"full"` (transcripts). Defaults to 20 conversations. Carries a `rerun` block — the call and config to re-run this simulation |
 | `get_conversation_transcript` | Retrieve the full conversation transcript for a single data point |
 | `reevaluate_test_run` | Re-score a completed test run against a (possibly different) set of checks |
 | `create_or_update_check` | Create or update a quality check by name — model-based, code-based, or audio (upsert) |
@@ -181,13 +181,13 @@ Then use `"command": "okareo-mcp"` instead of `"command": "uvx"` with `"args": [
 |------|-------------|
 | `create_or_update_target` | Create or update a Target — generation model, custom endpoint, or voice (OpenAI, Deepgram, Twilio) |
 | `get_target` | Retrieve a Target's configuration by name (all types) |
-| `list_targets` | List all simulation targets (voice and custom_endpoint) in the project |
+| `list_targets` | Find simulation targets (voice and custom_endpoint). Bounded to 20 by default; `name_contains` filters |
 | `delete_target` | Remove a simulation target and all its related test data |
 | `create_or_update_driver` | Define a simulated user persona that will interact with your target |
 | `get_driver` | Retrieve a Driver's full configuration including the persona prompt |
-| `list_drivers` | List all Driver personas in the project |
+| `list_drivers` | Find Driver personas. Bounded to 20 by default; `name_contains` filters |
 | `list_driver_voices` | Discover the voices, voice profiles, and languages available for voice drivers |
-| `run_simulation` | Run a multi-turn conversation evaluation (or rerun a previous one with overrides) |
+| `run_simulation` | Run a multi-turn conversation evaluation. With `based_on_run_id` it inherits the original run's full configuration; any argument you pass overrides that one field |
 | `list_simulations` | List past simulation runs with optional filters (target, scenario, limit) |
 
 ### Voice Monitoring

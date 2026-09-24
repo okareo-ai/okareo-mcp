@@ -10,7 +10,7 @@ Provides five MCP tools for the core test execution workflow:
 """
 
 import json
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
@@ -27,8 +27,18 @@ from src.okareo_client import (
     get_okareo_client,
     resolve_artifact_by_name,
     project_scoped,
-
     resolve_project,
+    resolve_run_provenance,
+)
+from src.run_config import rerun_block, resolve_run_config
+from src.response_depth import (
+    DEPTHS_LISTING,
+    DEPTHS_RUN,
+    DETAILED,
+    FULL,
+    SUMMARY,
+    page_window,
+    validate_depth,
 )
 
 # Test-run statuses that block re-evaluation — the run has not produced a
@@ -50,6 +60,11 @@ def _serialize_metrics(metrics) -> Optional[dict]:
     """Convert model metrics to a plain dict, handling Unset values."""
     if metrics is None:
         return None
+    # find_test_runs surfaces a 200 through UnexpectedStatus, whose body is
+    # json.loads'd into plain dicts -- the common path in practice, and one
+    # this helper used to answer None for.
+    if isinstance(metrics, dict):
+        return dict(metrics)
     try:
         if hasattr(metrics, "additional_properties"):
             return dict(metrics.additional_properties)
@@ -194,6 +209,101 @@ def _derive_run_check_ids(okareo, run_id, name_to_id: dict) -> list:
     return [name_to_id[n] for n in check_names if n in name_to_id]
 
 
+# The run-level fields this tool returns. A defined set, not a passthrough:
+# the raw record also carries filter_group_id, error_matrix, failure_message,
+# progress and tags, none of which answer a question a caller asked. Author
+# identity is retained deliberately -- it is provenance, answering who
+# produced a result (FR-006a).
+_RUN_ENVELOPE_FIELDS = (
+    "id",
+    "name",
+    "type",
+    "status",
+    "test_data_point_count",
+    "start_time",
+    "end_time",
+    "time_created",
+    "app_link",
+    "simulation_params",
+    "author_email",
+    "author_name",
+    "author_type",
+)
+
+
+def _run_envelope(run, okareo, project_id: str) -> dict:
+    """Build the defined run-level response from a raw run record."""
+    envelope: dict = {}
+    for field in _RUN_ENVELOPE_FIELDS:
+        value = (
+            run.get(field) if isinstance(run, dict) else _get_attr(run, field)
+        )
+        if value is not None:
+            envelope[field] = _serialize_value(value)
+
+    envelope.update(resolve_run_provenance(okareo, run, project_id))
+
+    metrics = (
+        run.get("model_metrics") if isinstance(run, dict)
+        else _get_attr(run, "model_metrics")
+    )
+    metrics = _serialize_metrics(metrics)
+    if isinstance(metrics, dict):
+        envelope["model_metrics"] = dict(metrics)
+    return envelope
+
+
+def _run_check_names(run, data_points) -> list:
+    """The check names a run was evaluated with.
+
+    `model_metrics.check_ids` is the source and survives
+    `return_model_metrics=False`, so it costs nothing. Some runs do not carry
+    it, and those fall back to the keys of the rows' own metric values — the
+    same derivation `_derive_run_check_ids` already performs (research R9).
+    """
+    metrics = (
+        run.get("model_metrics") if isinstance(run, dict)
+        else _get_attr(run, "model_metrics")
+    )
+    metrics = _serialize_value(metrics)
+    if isinstance(metrics, dict):
+        names = [
+            str(e["name"])
+            for e in (metrics.get("check_ids") or [])
+            if isinstance(e, dict) and e.get("name")
+        ]
+        if names:
+            return names
+
+    derived: list = []
+    for dp in data_points or []:
+        mv = _serialize_value(_get_attr(dp, "metric_value"))
+        if isinstance(mv, dict):
+            for key in mv:
+                if key not in derived and not key.endswith("__explanation"):
+                    derived.append(str(key))
+    return derived
+
+
+def _next_step_for_run(run_id, depth, limit, offset, has_more) -> Optional[str]:
+    """Name the call that retrieves what this response withheld (FR-020).
+
+    Without this an agent's reflex on a truncated response is to re-request
+    everything, which is the behaviour this feature exists to stop.
+    """
+    if has_more:
+        return (
+            f"get_test_run_results(test_run_id='{run_id}', "
+            f"detail_level='{depth}', limit={limit}, offset={offset + limit})"
+        )
+    if depth == SUMMARY:
+        return (
+            f"get_test_run_results(test_run_id='{run_id}', "
+            "detail_level='detailed') for per-check outcomes and explanations"
+        )
+    return None
+
+
 _SHARED_NOTE = (
     "Checks are shared across every project in your organization, not private to the project you are working in."
 )
@@ -268,26 +378,40 @@ def register_tools(mcp: FastMCP) -> None:
         if limit and limit > 0:
             entries = entries[:limit]
 
+        # A check carrying three categories used to be serialized three
+        # times, description and all. Categories now hold names and the
+        # entries live once in `checks` (FR-024).
         checks_by_category: dict = {}
         uncategorized: list = []
+        catalog: list = []
         for entry, categories in entries:
+            catalog.append(entry)
+            name = entry["name"]
             if categories:
                 for cat in categories:
-                    checks_by_category.setdefault(cat, []).append(entry)
-            else:
-                uncategorized.append(entry)
+                    # De-duplicated: with all_versions=True the same name
+                    # arrives once per version, and a category listing the
+                    # name three times says nothing extra.
+                    bucket = checks_by_category.setdefault(cat, [])
+                    if name not in bucket:
+                        bucket.append(name)
+            elif name not in uncategorized:
+                uncategorized.append(name)
 
         response = {
             "checks_by_category": checks_by_category,
             "uncategorized": uncategorized,
+            "checks": catalog,
             "count": len(entries),
             "total": total,
             "note": (
-                "Checks are grouped by the platform's __category tags. A check "
-                "with multiple categories appears under each; entries sharing "
-                "a name are the same check. Voice-specific categories apply to "
-                "voice simulations; other categories are generally useful for "
-                "both chat and voice."
+                "checks_by_category and uncategorized list check NAMES; each "
+                "check's description, output_data_type and version appear in "
+                "`checks`. A check with multiple categories is named under "
+                "each, and with all_versions=True `checks` holds one entry per "
+                "version of that name. Voice-specific categories apply to voice "
+                "simulations; other categories are generally useful for both "
+                "chat and voice."
             ),
         }
         if not entries:
@@ -492,28 +616,39 @@ def register_tools(mcp: FastMCP) -> None:
         model_name: Optional[str] = None,
         scenario_name: Optional[str] = None,
         limit: int = 10,
+        offset: int = 0,
         simulation_only: bool = False,
+        detail_level: str = "summary",
         project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
-        """List past test runs in the project.
+        """Find a test run in the project, most recent first.
 
-        Returns test run names, IDs, timestamps, status, and summary scores,
-        sorted by most recent first. Defaults to the 10 most recent runs.
-        Optionally filter by model name, scenario name, or type.
+        Two depths, because finding a run and comparing runs are different jobs:
 
-        For simulation runs (type MULTI_TURN), use get_test_run_results with the
-        returned test_run_id to retrieve full conversation transcripts and per-turn
-        check scores.
+        - "summary" (default): identity, type, status, conversation count,
+          timings, and what each run executed against (target, scenario,
+          driver). Enough to find the run you mean.
+        - "detailed": adds aggregate metrics, the app link, and the provenance
+          identifiers. Use it to compare runs without opening any of them.
+
+        Neither depth returns per-conversation scores — use
+        get_test_run_results for those.
 
         Args:
             model_name: Optional filter — only show test runs using this model.
             scenario_name: Optional filter — only show test runs using this scenario.
             limit: Maximum number of runs to return, sorted by most recent first.
                 Defaults to 10. Set to 0 to return all runs.
+            offset: Number of runs to skip. Defaults to 0.
             simulation_only: When True, return only MULTI_TURN simulation runs.
                 Useful for browsing past simulation results without NL_GENERATION or
                 other test run types appearing in the list.
+            detail_level: "summary" (default) or "detailed".
         """
+        invalid = validate_depth(detail_level, DEPTHS_LISTING)
+        if invalid is not None:
+            return invalid
+        detailed = detail_level == DETAILED
         from okareo_api_client.api.default import (
             get_scenario_sets_v0_scenario_sets_get,
         )
@@ -609,19 +744,17 @@ def register_tools(mcp: FastMCP) -> None:
         result = []
         for run in runs:
             if isinstance(run, dict):
-                result.append({
+                entry = {
                     "id": run.get("id", ""),
                     "name": run.get("name", ""),
                     "type": run.get("type", ""),
                     "status": run.get("status", ""),
                     "test_data_point_count": run.get("test_data_point_count", 0),
-                    "model_metrics": run.get("model_metrics"),
                     "start_time": run.get("start_time"),
                     "end_time": run.get("end_time"),
-                    "app_link": run.get("app_link", ""),
-                })
+                }
             else:
-                result.append({
+                entry = {
                     "id": _get_attr(run, "id", ""),
                     "name": _get_attr(run, "name", ""),
                     "type": _get_attr(run, "type", ""),
@@ -629,28 +762,60 @@ def register_tools(mcp: FastMCP) -> None:
                     "test_data_point_count": _get_attr(
                         run, "test_data_point_count", 0
                     ),
-                    "model_metrics": _serialize_metrics(
-                        _get_attr(run, "model_metrics")
-                    ),
                     "start_time": _serialize_datetime(
                         _get_attr(run, "start_time")
                     ),
                     "end_time": _serialize_datetime(
                         _get_attr(run, "end_time")
                     ),
-                    "app_link": _get_attr(run, "app_link", ""),
-                })
+                }
+
+            # What the run executed against. Absent from every listing before
+            # this feature, which made a comparison of two runs impossible to
+            # qualify (FR-025, FR-029).
+            entry.update(
+                resolve_run_provenance(
+                    okareo, run, project_id, include_ids=detailed
+                )
+            )
+
+            if detailed:
+                entry["model_metrics"] = (
+                    run.get("model_metrics") if isinstance(run, dict)
+                    else _serialize_metrics(_get_attr(run, "model_metrics"))
+                )
+                entry["app_link"] = (
+                    run.get("app_link", "") if isinstance(run, dict)
+                    else _get_attr(run, "app_link", "")
+                )
+            result.append(entry)
 
         # Sort by start_time descending (most recent first)
         result.sort(key=lambda r: r.get("start_time") or "", reverse=True)
 
-        # Apply limit (0 = return all)
-        if limit > 0:
-            result = result[:limit]
+        total_count = len(result)
+        start, stop, has_more = page_window(total_count, limit, offset)
+        page = result[start:stop]
 
-        return json.dumps(
-            {"test_runs": result, "count": len(result)}, default=str
-        )
+        response = {
+            "test_runs": page,
+            "count": len(page),
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+            "detail_level": detail_level,
+        }
+        if has_more:
+            response["next_step"] = (
+                f"list_test_runs(limit={limit}, offset={offset + limit}, "
+                f"detail_level='{detail_level}')"
+            )
+        elif not detailed:
+            response["next_step"] = (
+                "list_test_runs(detail_level='detailed') for aggregate metrics"
+            )
+        return json.dumps(response, default=str)
 
     @mcp.tool(
         title="Get Test Run Results",
@@ -665,38 +830,72 @@ def register_tools(mcp: FastMCP) -> None:
     def get_test_run_results(
         test_run_id: Optional[str] = None,
         name: Optional[str] = None,
-        include_transcripts: bool = False,
-        limit: int = 0,
+        detail_level: Optional[str] = None,
+        limit: int = 20,
         offset: int = 0,
+        include_transcripts: bool = False,
         project: Annotated[Optional[str], Field(description=PROJECT_PARAM_DESC)] = None,
     ) -> str:
-        """Load the results of a specific test run.
+        """Load the results of a specific test run, one page at a time.
 
         Look up by test run ID (UUID) or by name (returns the most recent run
-        matching that name). Returns aggregate metrics and per-row check scores.
+        matching that name). Both lookups return the same shape.
 
-        By default, conversation transcripts (model_input/model_result) are
-        excluded to keep responses concise. Set include_transcripts=True to
-        include full transcripts. Use get_conversation_transcript to inspect
-        a single conversation's transcript without loading all of them.
+        A test run is a container of conversations, so this reads like a list:
+        it returns a bounded page, not the whole run. Three depths:
 
-        Supports pagination via limit and offset for large result sets.
+        - "summary" (default): run aggregates, provenance, and each
+          conversation's whole scenario input and result. No per-check
+          outcomes, no explanations, no transcripts.
+        - "detailed": adds the row-level metrics block, which carries
+          per-check outcomes AND their written explanations. This is where you
+          find out which conversations failed and why.
+        - "full": adds conversation transcripts and any media.
+
+        Use get_conversation_transcript to inspect one conversation without
+        raising the depth for the whole page.
+
+        Every response carries a `rerun` block: the run_simulation call that
+        re-runs this simulation, and every configuration value that call will
+        inherit, already in the parameter shape the tool takes. To re-run with
+        a change — a different driver, an added check, background noise — pass
+        that one parameter alongside based_on_run_id and the rest carries over.
 
         Args:
             test_run_id: The UUID of the test run. Takes precedence over name.
             name: The name of the test run. Returns the most recent match.
-            include_transcripts: Include full model_input and model_result in
-                each data point, plus the data point's own `checks` — its Check
-                values and judge explanations, correctly paired to that row.
-                Defaults to False (scores only).
-            limit: Maximum number of data points to return. 0 (default) returns
-                all data points. Use with offset for pagination.
-            offset: Number of data points to skip. Defaults to 0.
+            detail_level: "summary" (default), "detailed", or "full".
+            limit: Conversations per page. Defaults to 20. Use 0 for all.
+            offset: Number of conversations to skip. Defaults to 0.
+            include_transcripts: DEPRECATED — use detail_level="full". Retained
+                for one release; detail_level wins when both are supplied.
         """
         from okareo_api_client.models.find_test_data_point_payload import (
             FindTestDataPointPayload,
         )
         from okareo_api_client.models.general_find_payload import GeneralFindPayload
+
+        # A bare `include_transcripts=True` has to mean "full", but an explicit
+        # detail_level must still win (FR-010a). Those are only distinguishable
+        # if the default is None rather than "summary".
+        deprecation = None
+        if include_transcripts:
+            deprecation = (
+                "include_transcripts is deprecated and will be removed after the "
+                "next release; use detail_level='full'."
+            )
+            if detail_level is None:
+                detail_level = FULL
+            else:
+                deprecation += (
+                    f" detail_level={detail_level!r} was supplied as well and takes "
+                    "precedence."
+                )
+        depth = detail_level or SUMMARY
+
+        invalid = validate_depth(depth, DEPTHS_RUN)
+        if invalid is not None:
+            return invalid
 
         if not test_run_id and not name:
             return json.dumps({
@@ -714,146 +913,73 @@ def register_tools(mcp: FastMCP) -> None:
         annotate(
             project_id=project_id,
             lookup_by=lookup_by,
-            include_transcripts=include_transcripts,
+            detail_level=depth,
+            # Kept alongside detail_level for the deprecation window so
+            # existing analytics keyed on the boolean stay comparable.
+            include_transcripts=(depth == FULL),
         )
 
-        resolved_id = test_run_id
-        run_metadata = None
-
-        # If looking up by name, resolve to most recent test run.
-        #
-        # No `id` to filter on -- the name is matched client-side, so this pulls
-        # every run in the project and is the one unbounded find_test_runs call
-        # left in this tool. Requesting row-level metrics here would attach a
-        # written explanation per check per row to all of them and 500 on a large
-        # project, exactly as the list tools did before #67. Nothing downstream
-        # needs them: _build_scenario_index_map reads scores_by_row, but those
-        # rows carry no test_id, so it already returns {} for every run the API
-        # returns and _scenario_index_map falls back to positional indexing.
-        if not test_run_id and name:
+        def _fetch_run(**kw):
             try:
-                payload = GeneralFindPayload(
-                    project_id=project_id,
-                    return_model_metrics=False,
+                runs = find_test_runs(
+                    okareo, GeneralFindPayload(project_id=project_id, **kw)
                 )
-                runs = find_test_runs(okareo, payload)
             except UnexpectedStatus as e:
-                if e.status_code == 200:
-                    runs = json.loads(e.content)
-                else:
-                    return format_tool_error(e)
-            except Exception as e:
-                return format_tool_error(e)
+                if e.status_code != 200:
+                    raise
+                runs = json.loads(e.content)
+            return runs if isinstance(runs, list) else None
 
-            if not runs or isinstance(runs, Exception):
-                return json.dumps({
-                    "error": f"No test run named '{name}' found. "
-                    "Use list_test_runs to find available test runs.",
-                })
+        resolved_id = test_run_id
 
-            # Filter by name and find most recent
-            matching = []
-            for run in runs:
-                if isinstance(run, dict):
-                    run_name = run.get("name", "")
-                    if run_name == name:
-                        matching.append(run)
-                else:
-                    run_name = _get_attr(run, "name", "")
-                    if run_name == name:
-                        matching.append(run)
-
-            if not matching:
-                return json.dumps({
-                    "error": f"No test run named '{name}' found. "
-                    "Use list_test_runs to find available test runs.",
-                })
-
-            # Sort by start_time descending, take most recent
-            def _get_start_time(r):
-                if isinstance(r, dict):
-                    return r.get("start_time", "")
-                return str(_get_attr(r, "start_time", ""))
-
-            matching.sort(key=_get_start_time, reverse=True)
-            best = matching[0]
-
-            if isinstance(best, dict):
-                resolved_id = best.get("id", "")
-                run_metadata = best
-            else:
-                resolved_id = _get_attr(best, "id", "")
-                run_metadata = {
-                    "id": _get_attr(best, "id", ""),
-                    "name": _get_attr(best, "name", ""),
-                    "type": _get_attr(best, "type", ""),
-                    "status": _get_attr(best, "status", ""),
-                    "test_data_point_count": _get_attr(
-                        best, "test_data_point_count", 0
-                    ),
-                    "model_metrics": _serialize_metrics(
-                        _get_attr(best, "model_metrics")
-                    ),
-                    "start_time": _serialize_datetime(
-                        _get_attr(best, "start_time")
-                    ),
-                    "end_time": _serialize_datetime(
-                        _get_attr(best, "end_time")
-                    ),
-                    "app_link": _get_attr(best, "app_link", ""),
-                }
-
-        # If we have a test_run_id but no metadata yet, fetch it
-        if run_metadata is None:
+        # Resolving a name means matching client-side over every run in the
+        # project -- GeneralFindPayload has no name filter and no limit. That
+        # sweep must never ask for row metrics: it would attach an explanation
+        # per check per row to every run in the project and 500 a large one.
+        # The depth the caller asked for is served by a second, id-bounded
+        # fetch below, so both lookup paths end up identical (research R3).
+        if not resolved_id and name:
             try:
-                payload = GeneralFindPayload(
-                    id=resolved_id,
-                    project_id=project_id,
-                    return_model_metrics=True,
-                )
-                try:
-                    runs = find_test_runs(okareo, payload)
-                except UnexpectedStatus as ue:
-                    runs = json.loads(ue.content) if ue.status_code == 200 else None
-                if runs and not isinstance(runs, Exception) and len(runs) > 0:
-                    r = runs[0]
-                    if isinstance(r, dict):
-                        run_metadata = r
-                    else:
-                        run_metadata = {
-                            "id": _get_attr(r, "id", ""),
-                            "name": _get_attr(r, "name", ""),
-                            "type": _get_attr(r, "type", ""),
-                            "status": _get_attr(r, "status", ""),
-                            "test_data_point_count": _get_attr(
-                                r, "test_data_point_count", 0
-                            ),
-                            "model_metrics": _serialize_metrics(
-                                _get_attr(r, "model_metrics")
-                            ),
-                            "start_time": _serialize_datetime(
-                                _get_attr(r, "start_time")
-                            ),
-                            "end_time": _serialize_datetime(
-                                _get_attr(r, "end_time")
-                            ),
-                            "app_link": _get_attr(r, "app_link", ""),
-                        }
-                else:
-                    return json.dumps({
-                        "error": f"Test run with ID '{test_run_id}' not found. "
-                        "Use list_test_runs to find available test runs.",
-                    })
+                everything = _fetch_run(return_model_metrics=False)
             except Exception as e:
                 return format_tool_error(e)
-
-        if resolved_id:
-            annotate(
-                entity_type="test_run",
-                entity_id=str(resolved_id),
+            matches = [
+                r for r in (everything or [])
+                if (r.get("name") if isinstance(r, dict) else _get_attr(r, "name"))
+                == name
+            ]
+            if not matches:
+                return json.dumps({
+                    "error": f"No test run named '{name}' found. "
+                    "Use list_test_runs to find available test runs.",
+                })
+            matches.sort(
+                key=lambda r: (
+                    r.get("start_time", "") if isinstance(r, dict)
+                    else str(_get_attr(r, "start_time", ""))
+                ),
+                reverse=True,
+            )
+            best = matches[0]
+            resolved_id = (
+                best.get("id") if isinstance(best, dict)
+                else _get_attr(best, "id", "")
             )
 
-        # Fetch per-row data points
+        try:
+            found = _fetch_run(id=resolved_id, return_model_metrics=False)
+        except Exception as e:
+            return format_tool_error(e)
+        if not found:
+            return json.dumps({
+                "error": f"Test run with ID '{resolved_id}' not found. "
+                "Use list_test_runs to find available test runs.",
+            })
+        raw_run = found[0]
+
+        if resolved_id:
+            annotate(entity_type="test_run", entity_id=str(resolved_id))
+
         try:
             data_points = okareo.find_test_data_points(
                 FindTestDataPointPayload(
@@ -863,79 +989,108 @@ def register_tools(mcp: FastMCP) -> None:
             )
         except Exception as e:
             return format_tool_error(e)
+        if not isinstance(data_points, list):
+            data_points = []
 
-        # Build scenario_index lookup from run metadata
-        index_map = _scenario_index_map(run_metadata, data_points)
+        index_map = _scenario_index_map(
+            raw_run if isinstance(raw_run, dict) else None, data_points
+        )
+
+        # One list to page. Per-row verdicts ride on the data points
+        # themselves, so there is no second list to keep aligned.
+        total_count = len(data_points)
+        start, stop, has_more = page_window(total_count, limit, offset)
 
         dp_list = []
-        if isinstance(data_points, list):
-            for dp in data_points:
-                # Resolve scenario_index via test_id
-                dp_id = _data_point_id(dp)
-                scenario_idx = index_map.get(dp_id)
-
-                metric = _serialize_value(_get_attr(dp, "metric_value"))
-                # Strip generation_output (contains full transcript) when
-                # transcripts are not requested
-                if (
-                    not include_transcripts
-                    and isinstance(metric, dict)
-                    and "generation_output" in metric
-                ):
-                    metric = {
-                        k: v
-                        for k, v in metric.items()
-                        if k != "generation_output"
-                    }
-
-                entry = {
-                    "scenario_index": scenario_idx,
-                    "test_id": dp_id,
-                    "scenario_input": _serialize_value(
-                        _get_attr(dp, "scenario_input")
-                    ),
-                    "scenario_result": _serialize_value(
-                        _get_attr(dp, "scenario_result")
-                    ),
-                    "metric_value": metric,
-                    "error_message": _get_attr(dp, "error_message"),
+        for dp in data_points[start:stop]:
+            dp_id = _data_point_id(dp)
+            metric = _serialize_value(_get_attr(dp, "metric_value"))
+            # generation_output carries the whole transcript, so it must not
+            # ride into a depth that excludes transcripts.
+            if (
+                depth != FULL
+                and isinstance(metric, dict)
+                and "generation_output" in metric
+            ):
+                metric = {
+                    k: v for k, v in metric.items() if k != "generation_output"
                 }
-                if include_transcripts:
-                    # The row's own Check results: values plus the judge's
-                    # explanation, correctly attached to this conversation.
-                    # The run-level scores_by_row carries no explanations and
-                    # no key to join on — this is the per-row source of truth.
-                    entry["checks"] = _serialize_value(_get_attr(dp, "checks"))
-                    entry["model_input"] = _serialize_value(
-                        _get_attr(dp, "model_input")
-                    )
-                    entry["model_result"] = _serialize_value(
-                        _get_attr(dp, "model_result")
-                    )
-                dp_list.append(entry)
 
-        # Pagination
-        total_count = len(dp_list)
-        if limit > 0:
-            paginated = dp_list[offset:offset + limit]
-            has_more = (offset + limit) < total_count
-        else:
-            paginated = dp_list[offset:] if offset > 0 else dp_list
-            has_more = False
+            entry = {
+                "scenario_index": index_map.get(dp_id),
+                "test_id": dp_id,
+                "scenario_input": _serialize_value(_get_attr(dp, "scenario_input")),
+                "scenario_result": _serialize_value(_get_attr(dp, "scenario_result")),
+                "metric_value": metric,
+                "error_message": _get_attr(dp, "error_message"),
+            }
+            if depth in (DETAILED, FULL):
+                # This row's own Check values and judge explanations, correctly
+                # paired to this conversation (041 FR-001). The judged prose is
+                # the bulk of a row, which is why it starts at `detailed`.
+                entry["checks"] = _serialize_value(_get_attr(dp, "checks"))
+            if depth == FULL:
+                entry["model_input"] = _serialize_value(_get_attr(dp, "model_input"))
+                entry["model_result"] = _serialize_value(_get_attr(dp, "model_result"))
+            dp_list.append(entry)
+
+        run_envelope = _run_envelope(raw_run, okareo, project_id)
+        metrics = run_envelope.get("model_metrics")
+        if isinstance(metrics, dict):
+            # Never surfaced, at any depth. The run-level row block is not
+            # positionally aligned to the data-point list and carries no key
+            # to join on (041), so pairing a verdict to a conversation through
+            # it is guesswork -- and the backend is removing __explanation
+            # from it besides. Per-row verdicts and evidence come from each
+            # data point's own `checks`, which is correctly attached and rides
+            # on the page. Dropping this also means the run fetch never asks
+            # for it, so the saving is on the wire at every depth.
+            metrics.pop("scores_by_row", None)
+            metrics.pop("scores_by_label", None)
+            metrics.pop("row_level_metrics", None)
 
         annotate(result_count=total_count)
 
+        # The run's action surface: what a re-run would be, and what it would
+        # carry (FR-033). Built from the same resolver `based_on_run_id`
+        # consumes, so the block is a promise rather than a rendering.
+        config = resolve_run_config(raw_run, _run_check_names(raw_run, data_points))
+
         response = {
-            "test_run": run_metadata,
-            "data_points": paginated,
-            "data_point_count": len(paginated),
+            "test_run": run_envelope,
+            "rerun": rerun_block(str(resolved_id), config),
+            "data_points": dp_list,
+            "data_point_count": len(dp_list),
             "total_count": total_count,
             "limit": limit,
             "offset": offset,
             "has_more": has_more,
+            "detail_level": depth,
         }
+        if deprecation:
+            response["deprecation"] = deprecation
+
+        nxt = _next_step_for_run(resolved_id, depth, limit, offset, has_more)
+        if nxt:
+            response["next_step"] = nxt
 
         return json.dumps(response, default=str)
+
+    def _dropped_turns(data_point: Any) -> dict:
+        """Turns the dropout augmentation silenced, when there were any.
+
+        A dropped turn leaves no message in the transcript by design, so
+        without this a silenced turn cannot be told apart from one that never
+        happened. Omitted when empty, which is every run without dropout.
+        """
+        raw = _get_attr(data_point, "model_metadata")
+        meta = raw.to_dict() if hasattr(raw, "to_dict") else raw
+        if not isinstance(meta, dict):
+            return {}
+        dropped = meta.get("dropped_turns")
+        if not isinstance(dropped, list) or not dropped:
+            return {}
+        return {"dropped_turns": dropped}
 
     @mcp.tool(
         title="Get Conversation Transcript",
@@ -1102,6 +1257,7 @@ def register_tools(mcp: FastMCP) -> None:
                 _get_attr(match, "metric_value")
             ),
             "error_message": _get_attr(match, "error_message"),
+            **_dropped_turns(match),
         }, default=str)
 
     @mcp.tool(

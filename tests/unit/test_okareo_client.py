@@ -557,3 +557,214 @@ class TestResolveArtifactByName:
         with pytest.raises(ArtifactNotInProject) as exc:
             self._call("anything", [])
         assert exc.value.data["available"] == []
+
+
+class TestProvenanceNameCaches:
+    """043 research R4: bulk-resolve once, degrade gracefully on a miss.
+
+    These caches carry no invalidation hooks on purpose. A miss falls back to
+    the identifier without a name (FR-028), which self-heals within the TTL --
+    unlike the project cache, where a stale list breaks resolution outright.
+    """
+
+    def _client_with(self, targets=None, scenarios=None, drivers=None):
+        okareo = MagicMock()
+        okareo.api_key = "k-prov"
+        okareo.client = MagicMock()
+        return okareo
+
+    def _patch_endpoints(self, monkeypatch, targets=(), scenarios=(), drivers=()):
+        """Patch the three bulk listing endpoints, counting calls."""
+        from okareo_api_client.api import default as pkg
+
+        calls = {"targets": 0, "scenarios": 0, "drivers": 0}
+
+        def _mk(kind, payload):
+            mod = MagicMock()
+
+            def _sync(**kwargs):
+                calls[kind] += 1
+                return list(payload)
+
+            mod.sync = _sync
+            return mod
+
+        monkeypatch.setattr(
+            pkg, "get_all_models_under_test_v0_models_under_test_get",
+            _mk("targets", targets), raising=False,
+        )
+        monkeypatch.setattr(
+            pkg, "get_scenario_sets_v0_scenario_sets_get",
+            _mk("scenarios", scenarios), raising=False,
+        )
+        monkeypatch.setattr(
+            pkg, "get_all_drivers_v0_drivers_get",
+            _mk("drivers", drivers), raising=False,
+        )
+        return calls
+
+    def test_ids_resolve_to_names(self, monkeypatch):
+        import src.okareo_client as mod
+
+        self._patch_endpoints(
+            monkeypatch,
+            targets=[{"id": "m1", "name": "Pandora Voice"}],
+            scenarios=[{"scenario_id": "s1", "name": "confused-caller"}],
+            drivers=[{"id": "d1", "name": "angry-caller"}],
+        )
+        okareo = self._client_with()
+        run = {"mut_id": "m1", "scenario_set_id": "s1", "driver_id": "d1"}
+
+        prov = mod.resolve_run_provenance(okareo, run, "proj-1")
+
+        assert prov["target"]["name"] == "Pandora Voice"
+        assert prov["scenario"]["name"] == "confused-caller"
+        assert prov["driver"]["name"] == "angry-caller"
+        assert prov["target"]["id"] == "m1"
+
+    def test_listing_depth_can_drop_the_identifiers(self, monkeypatch):
+        """FR-026: names only at summary, ~75 B a row instead of ~190 B."""
+        import src.okareo_client as mod
+
+        self._patch_endpoints(
+            monkeypatch, targets=[{"id": "m1", "name": "Pandora Voice"}],
+        )
+        prov = mod.resolve_run_provenance(
+            self._client_with(), {"mut_id": "m1"}, "proj-1", include_ids=False,
+        )
+        assert prov["target"] == {"name": "Pandora Voice"}
+
+    def test_many_runs_cost_one_fetch_each(self, monkeypatch):
+        """FR-027: resolution must not scale with the number of listed runs."""
+        import src.okareo_client as mod
+
+        calls = self._patch_endpoints(
+            monkeypatch,
+            targets=[{"id": "m1", "name": "T"}],
+            scenarios=[{"scenario_id": "s1", "name": "S"}],
+            drivers=[{"id": "d1", "name": "D"}],
+        )
+        okareo = self._client_with()
+        run = {"mut_id": "m1", "scenario_set_id": "s1", "driver_id": "d1"}
+
+        for _ in range(20):
+            mod.resolve_run_provenance(okareo, run, "proj-1")
+
+        assert calls == {"targets": 1, "scenarios": 1, "drivers": 1}
+
+    def test_unresolvable_id_keeps_id_and_omits_name(self, monkeypatch):
+        """FR-028: a deleted target must not fail the listing."""
+        import src.okareo_client as mod
+
+        self._patch_endpoints(monkeypatch, targets=[{"id": "other", "name": "X"}])
+        prov = mod.resolve_run_provenance(
+            self._client_with(), {"mut_id": "deleted-m"}, "proj-1",
+        )
+        assert prov["target"] == {"id": "deleted-m"}
+        assert "name" not in prov["target"]
+
+    def test_fetch_failure_degrades_without_raising(self, monkeypatch):
+        import src.okareo_client as mod
+        from okareo_api_client.api import default as pkg
+
+        boom = MagicMock()
+        boom.sync = MagicMock(side_effect=RuntimeError("upstream down"))
+        monkeypatch.setattr(
+            pkg, "get_all_models_under_test_v0_models_under_test_get",
+            boom, raising=False,
+        )
+        prov = mod.resolve_run_provenance(
+            self._client_with(), {"mut_id": "m1"}, "proj-1",
+        )
+        assert prov["target"] == {"id": "m1"}
+
+    def test_failure_is_not_cached(self, monkeypatch):
+        """A transient outage must not blank names for the whole TTL."""
+        import src.okareo_client as mod
+        from okareo_api_client.api import default as pkg
+
+        state = {"fail": True}
+        mod_mock = MagicMock()
+
+        def _sync(**kwargs):
+            if state["fail"]:
+                raise RuntimeError("transient")
+            return [{"id": "m1", "name": "Recovered"}]
+
+        mod_mock.sync = _sync
+        monkeypatch.setattr(
+            pkg, "get_all_models_under_test_v0_models_under_test_get",
+            mod_mock, raising=False,
+        )
+        okareo = self._client_with()
+        assert mod.get_targets_cached(okareo, "proj-1") == {}
+        state["fail"] = False
+        assert mod.get_targets_cached(okareo, "proj-1") == {"m1": "Recovered"}
+
+    def test_ttl_expiry_refetches(self, monkeypatch):
+        import src.okareo_client as mod
+
+        calls = self._patch_endpoints(
+            monkeypatch, targets=[{"id": "m1", "name": "T"}],
+        )
+        okareo = self._client_with()
+        mod.get_targets_cached(okareo, "proj-1")
+        assert calls["targets"] == 1
+
+        real = mod.time.monotonic
+        monkeypatch.setattr(
+            mod.time, "monotonic",
+            lambda: real() + mod._ARTIFACT_NAME_CACHE_TTL_SECONDS + 1,
+        )
+        mod.get_targets_cached(okareo, "proj-1")
+        assert calls["targets"] == 2
+
+    def test_targets_are_keyed_per_project(self, monkeypatch):
+        """Targets and scenarios are project-scoped; two projects must not share."""
+        import src.okareo_client as mod
+
+        calls = self._patch_endpoints(
+            monkeypatch, targets=[{"id": "m1", "name": "T"}],
+        )
+        okareo = self._client_with()
+        mod.get_targets_cached(okareo, "proj-1")
+        mod.get_targets_cached(okareo, "proj-2")
+        assert calls["targets"] == 2
+
+    def test_drivers_are_not_keyed_per_project(self, monkeypatch):
+        """Drivers are organization-shared (FR-027), so the project is irrelevant."""
+        import src.okareo_client as mod
+
+        calls = self._patch_endpoints(
+            monkeypatch, drivers=[{"id": "d1", "name": "D"}],
+        )
+        okareo = self._client_with()
+        mod.get_drivers_cached(okareo)
+        mod.get_drivers_cached(okareo)
+        assert calls["drivers"] == 1
+
+    def test_cache_key_carries_no_raw_credential(self, monkeypatch):
+        import src.okareo_client as mod
+
+        self._patch_endpoints(monkeypatch, targets=[{"id": "m1", "name": "T"}])
+        okareo = self._client_with()
+        mod.get_targets_cached(okareo, "proj-1")
+        key = next(iter(mod._target_name_cache))
+        assert okareo.api_key not in str(key)
+
+    def test_bound_clears_wholesale(self, monkeypatch):
+        import src.okareo_client as mod
+
+        self._patch_endpoints(monkeypatch, targets=[{"id": "m1", "name": "T"}])
+        okareo = self._client_with()
+        for i in range(mod._ARTIFACT_NAME_CACHE_BOUND + 2):
+            mod.get_targets_cached(okareo, f"proj-{i}")
+        assert len(mod._target_name_cache) <= mod._ARTIFACT_NAME_CACHE_BOUND
+
+    def test_run_without_provenance_ids_yields_empty(self, monkeypatch):
+        import src.okareo_client as mod
+
+        self._patch_endpoints(monkeypatch)
+        assert mod.resolve_run_provenance(
+            self._client_with(), {"id": "run-1"}, "proj-1",
+        ) == {}

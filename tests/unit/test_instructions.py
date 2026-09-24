@@ -118,6 +118,10 @@ def test_instructions_tool_names_valid():
         "model_metrics",
         "scenario_index",
         "estimated_runtime",
+        # run_simulation parameter names (043 US6), not tools
+        "based_on_run_id",
+        "stop_check",
+        "max_turns",
         # Project error codes (not tool names) — 036-project-scoping
         "project_not_selected",
         "project_not_found",

@@ -53,7 +53,74 @@ KNOWN_STRATEGIES: tuple[str, ...] = (
     "backchannel",
     "barge_in",
     "noise",
+    "dropout",
 )
+
+
+# The Okareo server keeps only these keys per strategy and silently drops the
+# rest, so a setting outside this set would look accepted and do nothing.
+# Transcribed from okareo-server
+# fastapi-web/app/services/testruns/execution/voice/augmentation/parse.py
+# ::_normalize_strategy_config @ 157010dc, including the alias spellings it
+# normalizes. Re-check that function when the Okareo server adds a setting.
+ALLOWED_FIELDS: dict[str, frozenset[str]] = {
+    "cap": frozenset({"probability", "pause_ms"}),
+    "directed_speech": frozenset({
+        "prompt", "probability", "start_at_turn", "lpf_cutoff_hz", "gain_db",
+        "sample_rate", "reverb_preset",
+    }),
+    "secondary_speaker": frozenset({
+        "probability", "start_at_turn", "secondary_voice", "secondary_prompt",
+        "secondary_voice_instructions", "lpf_cutoff_hz", "gain_db",
+        "inter_speaker_pause_ms", "sample_rate", "secondary_reverb_preset",
+        "voice", "prompt", "reverb_preset",
+    }),
+    "backchannel": frozenset({
+        "utterance", "probability", "start_at_turn", "min_offset_ms",
+        "max_offset_ms", "seed",
+    }),
+    "barge_in": frozenset({
+        "prompt", "probability", "start_at_turn", "min_offset_ms",
+        "max_offset_ms", "seed",
+    }),
+    "dropout": frozenset({"probability", "start_at_turn", "seed"}),
+    "noise": frozenset({
+        "noise_profile", "noise_snr_db", "seed", "profile", "snr_db",
+    }),
+}
+
+# alias -> canonical. The block is forwarded unchanged; the Okareo server
+# does this normalization, keeping the canonical key when both are present.
+ALIASES: dict[str, dict[str, str]] = {
+    "noise": {"profile": "noise_profile", "snr_db": "noise_snr_db"},
+    "secondary_speaker": {
+        "voice": "secondary_voice",
+        "prompt": "secondary_prompt",
+        "reverb_preset": "secondary_reverb_preset",
+    },
+}
+
+# Settings the SDK publishes that the Okareo server discards. They get their
+# own message because a caller following the SDK docs did nothing wrong.
+SDK_IGNORED_BY_SERVER: dict[str, dict[str, str]] = {
+    "noise": {
+        "probability": (
+            "noise.probability is published by the SDK but ignored by "
+            "Okareo: noise plays for the whole call. Remove it."
+        ),
+    },
+    "barge_in": {
+        "replacement_text": (
+            "barge_in.replacement_text is published by the SDK but ignored "
+            "by Okareo. Use barge_in.prompt to steer what the interruption "
+            "says."
+        ),
+        "utterance": (
+            "barge_in.utterance is published by the SDK but ignored by "
+            "Okareo. Use barge_in.prompt to steer what the interruption says."
+        ),
+    },
+}
 
 
 def _err(strategy: str, field: str, message: str) -> dict:
@@ -206,6 +273,67 @@ def _validate_offsets(strategy: str, config: dict) -> list[dict]:
     return errors
 
 
+def validate_strategy_fields(strategy: str, config: dict) -> list[dict]:
+    """Reject settings the Okareo server would silently drop for `strategy`."""
+    allowed = ALLOWED_FIELDS.get(strategy)
+    if allowed is None:
+        return []
+    ignored = SDK_IGNORED_BY_SERVER.get(strategy, {})
+    errors: list[dict] = []
+    for key in config:
+        if key in ignored:
+            errors.append(_err(strategy, key, ignored[key]))
+        elif key not in allowed:
+            errors.append(_err(
+                strategy,
+                key,
+                f"Unknown field {strategy}.{key}. "
+                f"{strategy} accepts: {sorted(allowed)}.",
+            ))
+    for alias, canonical in ALIASES.get(strategy, {}).items():
+        if alias in config and canonical in config:
+            errors.append(_err(
+                strategy,
+                alias,
+                f"Set either {strategy}.{alias} or {strategy}.{canonical}, "
+                "not both.",
+            ))
+    return errors
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_start_at_turn(strategy: str, config: dict) -> list[dict]:
+    if "start_at_turn" not in config:
+        return []
+    v = config["start_at_turn"]
+    if _is_int(v) and v >= 1:
+        return []
+    return [_err(
+        strategy,
+        "start_at_turn",
+        (
+            f"Invalid {strategy}.start_at_turn={v!r}. Must be an int >= 1 "
+            "(turn 0 is the agent's greeting)."
+        ),
+    )]
+
+
+def _validate_seed(strategy: str, config: dict) -> list[dict]:
+    if "seed" not in config:
+        return []
+    v = config["seed"]
+    if v is None or _is_int(v):
+        return []
+    return [_err(
+        strategy,
+        "seed",
+        f"Invalid {strategy}.seed={v!r}. Must be an int or null.",
+    )]
+
+
 def validate_cap(config: dict) -> list[dict]:
     s = "cap"
     errors = _validate_probability(s, config)
@@ -222,18 +350,25 @@ def validate_cap(config: dict) -> list[dict]:
 
 def validate_directed_speech(config: dict) -> list[dict]:
     s = "directed_speech"
-    return _validate_probability(s, config) + _validate_lpf_gain_sr(s, config)
+    return (
+        _validate_probability(s, config)
+        + _validate_lpf_gain_sr(s, config)
+        + _validate_start_at_turn(s, config)
+    )
 
 
 def validate_secondary_speaker(config: dict) -> list[dict]:
     s = "secondary_speaker"
     errors = _validate_probability(s, config)
-    voice = config.get("secondary_voice")
+    voice = config.get("secondary_voice", config.get("voice"))
     if not isinstance(voice, str) or not voice:
         errors.append(_err(
             s,
             "secondary_voice",
-            f"{s}.secondary_voice is required and must be a non-empty string.",
+            (
+                f"{s}.secondary_voice (or {s}.voice) is required and must be "
+                "a non-empty string."
+            ),
         ))
     if "inter_speaker_pause_ms" in config:
         v = config["inter_speaker_pause_ms"]
@@ -247,6 +382,7 @@ def validate_secondary_speaker(config: dict) -> list[dict]:
                 ),
             ))
     errors.extend(_validate_lpf_gain_sr(s, config))
+    errors.extend(_validate_start_at_turn(s, config))
     return errors
 
 
@@ -274,6 +410,8 @@ def validate_backchannel(config: dict) -> list[dict]:
                 f"Invalid {s}.probability={v!r}. Must be in [0.0, 1.0].",
             ))
     errors.extend(_validate_offsets(s, config))
+    errors.extend(_validate_start_at_turn(s, config))
+    errors.extend(_validate_seed(s, config))
     return errors
 
 
@@ -289,34 +427,47 @@ def validate_barge_in(config: dict) -> list[dict]:
                 f"Invalid {s}.probability={v!r}. Must be in [0.0, 1.0].",
             ))
     errors.extend(_validate_offsets(s, config))
+    errors.extend(_validate_start_at_turn(s, config))
+    errors.extend(_validate_seed(s, config))
     return errors
+
+
+def validate_dropout(config: dict) -> list[dict]:
+    s = "dropout"
+    return (
+        _validate_probability(s, config)
+        + _validate_start_at_turn(s, config)
+        + _validate_seed(s, config)
+    )
 
 
 def validate_noise(config: dict) -> list[dict]:
     s = "noise"
     errors: list[dict] = []
-    profile = config.get("noise_profile")
+    profile = config.get("noise_profile", config.get("profile"))
     if not isinstance(profile, str) or not profile:
         errors.append(_err(
             s,
             "noise_profile",
-            f"{s}.noise_profile is required and must be a non-empty string.",
-        ))
-    if "noise_snr_db" not in config:
-        errors.append(_err(
-            s,
-            "noise_snr_db",
-            f"{s}.noise_snr_db is required.",
-        ))
-    elif not _is_real_number(config["noise_snr_db"]):
-        errors.append(_err(
-            s,
-            "noise_snr_db",
             (
-                f"Invalid {s}.noise_snr_db={config['noise_snr_db']!r}. "
-                "Must be a number."
+                f"{s}.noise_profile (or {s}.profile) is required and must be "
+                "a non-empty string."
             ),
         ))
+    snr_key = "noise_snr_db" if "noise_snr_db" in config else "snr_db"
+    if snr_key not in config:
+        errors.append(_err(
+            s,
+            "noise_snr_db",
+            f"{s}.noise_snr_db (or {s}.snr_db) is required.",
+        ))
+    elif not _is_real_number(config[snr_key]):
+        errors.append(_err(
+            s,
+            "noise_snr_db",
+            f"Invalid {s}.{snr_key}={config[snr_key]!r}. Must be a number.",
+        ))
+    errors.extend(_validate_seed(s, config))
     return errors
 
 
@@ -327,6 +478,7 @@ _STRATEGY_VALIDATORS = {
     "backchannel": validate_backchannel,
     "barge_in": validate_barge_in,
     "noise": validate_noise,
+    "dropout": validate_dropout,
 }
 
 
@@ -341,7 +493,8 @@ def validate_augmentation(
     contracts/run_simulation.contract.md:
 
     1. unknown-keys
-    2. per-strategy required fields + ranges + offset ordering
+    2. per-strategy fields the Okareo server would drop, and alias clashes
+    3. per-strategy required fields + ranges + offset ordering
 
     Returns the list of all error envelopes encountered (empty if pass).
     Composition rule is checked separately by `validate_composition` so
@@ -368,6 +521,65 @@ def validate_augmentation(
                 "strategy": key,
             })
             continue
+        errors.extend(validate_strategy_fields(key, config))
         errors.extend(validator(config))
 
     return errors
+
+
+def preflight_augmentation(
+    augmentation: Optional[dict],
+    max_turns: Optional[int],
+) -> Optional[dict]:
+    """Validate an augmentation block; return an error payload or None.
+
+    Called twice by run_simulation: once on the caller's block before any
+    network call, and again after `based_on_run_id` inheritance, because an
+    inherited block and an inherited `max_turns` are only known then.
+    `max_turns=None` means it is not final yet, so the bound is skipped.
+    """
+    if not augmentation:
+        return None
+
+    conflicts = validate_composition(augmentation)
+    if conflicts:
+        return {
+            "error": (
+                f"Unsupported augmentation combination: "
+                f"{', '.join(conflicts)}. "
+                "Only noise + one other strategy is composable."
+            ),
+            "conflicting_strategies": conflicts,
+        }
+
+    aug_errors = validate_augmentation(augmentation)
+    if aug_errors:
+        primary = aug_errors[0]
+        payload = {
+            "error": primary["error"],
+            "field": primary.get("field"),
+            "strategy": primary.get("strategy"),
+        }
+        if "known" in primary:
+            payload["known"] = primary["known"]
+        if len(aug_errors) > 1:
+            payload["additional_errors"] = aug_errors[1:]
+        return payload
+
+    # The Okareo server accepts a start_at_turn past the end of the run and
+    # simply never fires it, so the run would look clean while testing nothing.
+    if max_turns is not None:
+        for name, config in augmentation.items():
+            turn = config.get("start_at_turn") if isinstance(config, dict) else None
+            if _is_int(turn) and turn > max_turns:
+                return {
+                    "error": (
+                        f"augmentation.{name}.start_at_turn={turn} is beyond "
+                        f"max_turns={max_turns}, so {name} would never fire. "
+                        "Lower start_at_turn or raise max_turns."
+                    ),
+                    "field": f"augmentation.{name}.start_at_turn",
+                    "strategy": name,
+                }
+
+    return None

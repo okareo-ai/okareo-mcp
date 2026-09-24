@@ -1,7 +1,7 @@
 """Integration: run_simulation augmented path (spec 023-tool-fixes US4, US5, US8).
 
 Mocks the okareo SDK boundary and verifies:
-- Each of the 5 non-noise strategies produces a run_test call carrying the
+- Each of the 6 non-noise strategies produces a run_test call carrying the
   augmentation block on simulation_params (T017).
 - Composing noise with a non-noise strategy works; two non-noise strategies
   are rejected before any SDK call (T022).
@@ -112,7 +112,7 @@ def _mock_okareo_for_augmented_path(target=None, driver=None):
 
 
 # ---------------------------------------------------------------------------
-# T017 — Each of the 5 non-noise strategies submits an augmented run
+# T017 — Each of the 6 non-noise strategies submits an augmented run
 # ---------------------------------------------------------------------------
 
 class TestEachStrategy:
@@ -131,6 +131,7 @@ class TestEachStrategy:
                 "prompt": "Politely interrupt.", "probability": 0.2,
                 "min_offset_ms": 200, "max_offset_ms": 600,
             }),
+            ("dropout", {"probability": 0.3, "start_at_turn": 2}),
         ],
     )
     @patch("okareo.model_under_test.ModelUnderTest")
@@ -455,3 +456,119 @@ class TestBackwardCompatibility:
         kwargs = sim_submission.call_args.kwargs
         assert "augmentation" not in kwargs
         assert "silence_timeout_ms" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# 044 — dropout with SDK spellings; start_at_turn against max_turns
+# ---------------------------------------------------------------------------
+
+def _run_augmented(tools, mock_client, mock_project, mock_mut_class,
+                   mock_get_scenario_sets, augmentation, **kwargs):
+    mock_project.return_value = ResolvedProject(
+        id="00000000-0000-0000-0000-000000000111", name="Global", basis="default",
+    )
+    okareo, mut_instance = _mock_okareo_for_augmented_path()
+    mock_client.return_value = okareo
+    mock_mut_class.return_value = mut_instance
+    mock_get_scenario_sets.sync.return_value = [_make_scenario()]
+    result = json.loads(tools["run_simulation"](
+        name="voice-044-run",
+        scenario_name="my-scenario",
+        target_name="voice-target",
+        driver_name="my-driver",
+        augmentation=augmentation,
+        **kwargs,
+    ))
+    return result, okareo, mut_instance
+
+
+class TestDropoutAndStartAtTurn:
+    @patch("okareo.model_under_test.ModelUnderTest")
+    @patch("src.tools.simulations.resolve_project")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_dropout_plus_noise_sdk_spelling_reaches_run_test(
+        self, mock_client, mock_project, mock_mut_class, tools,
+        mock_get_scenario_sets, sim_submission,
+    ):
+        block = {
+            "dropout": {"probability": 0.3},
+            "noise": {"profile": "cafeteria", "snr_db": 10},
+        }
+        result, _, mut_instance = _run_augmented(
+            tools, mock_client, mock_project, mock_mut_class,
+            mock_get_scenario_sets, block,
+        )
+        assert "error" not in result, result
+        emitted = mut_instance.run_test.call_args.kwargs["simulation_params"].to_dict()
+        assert emitted["augmentation"] == block
+
+    @patch("okareo.model_under_test.ModelUnderTest")
+    @patch("src.tools.simulations.resolve_project")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_start_at_turn_beyond_max_turns_rejected_before_sdk(
+        self, mock_client, mock_project, mock_mut_class, tools,
+        mock_get_scenario_sets,
+    ):
+        result, okareo, mut_instance = _run_augmented(
+            tools, mock_client, mock_project, mock_mut_class,
+            mock_get_scenario_sets,
+            {"dropout": {"probability": 0.3, "start_at_turn": 6}},
+            max_turns=5,
+        )
+        assert result["error"] == (
+            "augmentation.dropout.start_at_turn=6 is beyond max_turns=5, so "
+            "dropout would never fire. Lower start_at_turn or raise max_turns."
+        )
+        okareo.get_target_by_name.assert_not_called()
+        mut_instance.run_test.assert_not_called()
+
+    @patch("okareo.model_under_test.ModelUnderTest")
+    @patch("src.tools.simulations.resolve_project")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_start_at_turn_equal_max_turns_accepted(
+        self, mock_client, mock_project, mock_mut_class, tools,
+        mock_get_scenario_sets, sim_submission,
+    ):
+        result, _, mut_instance = _run_augmented(
+            tools, mock_client, mock_project, mock_mut_class,
+            mock_get_scenario_sets,
+            {"dropout": {"probability": 0.3, "start_at_turn": 5}},
+            max_turns=5,
+        )
+        assert "error" not in result, result
+        mut_instance.run_test.assert_called_once()
+
+
+class TestPayloadUnchanged:
+    """044 FR-012: the block is validated, never rewritten. A block that was
+    valid before 044 must reach the Okareo server exactly as written."""
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            {"cap": {"probability": 0.4, "pause_ms": 800}},
+            {"directed_speech": {"probability": 0.3, "gain_db": -8.0}},
+            {"secondary_speaker": {
+                "probability": 0.3, "secondary_voice": "Cathy - Coworker",
+                "inter_speaker_pause_ms": 120,
+            }},
+            {"backchannel": {"utterance": "mm-hmm", "probability": 0.35}},
+            {"barge_in": {"prompt": "x", "seed": 3},
+             "noise": {"noise_profile": "cafeteria", "noise_snr_db": 10}},
+            {"noise": {"noise_snr_db": 5, "noise_profile": "traffic", "seed": 1}},
+        ],
+    )
+    @patch("okareo.model_under_test.ModelUnderTest")
+    @patch("src.tools.simulations.resolve_project")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_previously_valid_block_is_byte_identical(
+        self, mock_client, mock_project, mock_mut_class, block, tools,
+        mock_get_scenario_sets, sim_submission,
+    ):
+        result, _, mut_instance = _run_augmented(
+            tools, mock_client, mock_project, mock_mut_class,
+            mock_get_scenario_sets, block,
+        )
+        assert "error" not in result, result
+        emitted = mut_instance.run_test.call_args.kwargs["simulation_params"].to_dict()
+        assert json.dumps(emitted["augmentation"]) == json.dumps(block)

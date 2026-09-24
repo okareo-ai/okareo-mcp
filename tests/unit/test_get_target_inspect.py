@@ -200,3 +200,28 @@ def test_no_target_level_streaming_alias_documented(tools):
     assert "next_message_params" in create_doc
     # get_target docstring does not introduce a streaming concept of its own
     assert "Target-level streaming" not in get_doc
+
+
+# ---------------------------------------------------------------------------
+# 044 US4 — a legacy openai_assistant Target still fetches, with its type
+# ---------------------------------------------------------------------------
+
+@patch("src.tools.simulations.resolve_project")
+@patch("src.tools.simulations.get_okareo_client")
+def test_legacy_openai_assistant_target_fetches(mock_client, mock_project, tools):
+    mock_client.return_value = MagicMock()
+    mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
+    mut = {
+        "id": "mut-oa",
+        "name": "legacy-assistant",
+        "models": {"openai_assistant": {"model_id": "asst_123"}},
+    }
+    with patch(
+        "okareo_api_client.api.default.get_all_models_under_test_v0_models_under_test_get.sync",
+        return_value=[mut],
+    ):
+        resp = json.loads(tools["get_target"](name="legacy-assistant"))
+
+    assert "error" not in resp, resp
+    assert resp["type"] == "openai_assistant"
+    assert resp["target"] == {"model_id": "asst_123"}

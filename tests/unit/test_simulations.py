@@ -431,6 +431,27 @@ class TestListTargets:
 
     @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
+    def test_legacy_openai_assistant_target_lists(self, mock_client, mock_project, tools):
+        """044 US4: a Target of the retired openai_assistant type must not break
+        the listing. Like generation Targets it is not a simulation Target, so
+        it is filtered out rather than shown."""
+        mock_client.return_value = MagicMock()
+        mock_project.return_value = ResolvedProject(id="proj-123", name="Global", basis="default")
+        muts = [
+            {"id": "mut-oa", "name": "legacy-assistant", "models": {"openai_assistant": {"model_id": "asst_123"}}, "time_created": "2026-01-01T00:00:00"},
+            {"id": "mut-voice", "name": "voice-target", "models": {"voice": {"edge_type": "twilio"}}, "time_created": "2026-02-20T01:00:00"},
+        ]
+        with patch(
+            "okareo_api_client.api.default.get_all_models_under_test_v0_models_under_test_get.sync",
+            return_value=muts,
+        ):
+            result = json.loads(tools["list_targets"]())
+
+        assert "error" not in result
+        assert {t["name"] for t in result["targets"]} == {"voice-target"}
+
+    @patch("src.tools.simulations.resolve_project")
+    @patch("src.tools.simulations.get_okareo_client")
     def test_empty_list_returns_message(self, mock_client, mock_project, tools):
         """Empty MUT list returns empty targets with message."""
         mock_okareo = MagicMock()
@@ -1555,3 +1576,503 @@ class TestListSimulationsMetricsRequest:
         # detailed mode's cap to 5 is a client-side slice applied after the whole
         # response has arrived, so it bounds the output but not the request.
         assert self._run("detailed").return_model_metrics is False
+
+
+class TestListSimulationsComparison:
+    """043 US4: the comparison path existed but was capped at 5, low enough
+    that agents routed around it and opened each run individually — which is
+    the expensive call this feature exists to avoid.
+    """
+
+    def _sim(self, i):
+        return {
+            "id": f"sim-{i}",
+            "name": f"sim {i}",
+            "type": "MULTI_TURN",
+            "status": "FINISHED",
+            "test_data_point_count": 4,
+            "start_time": f"2026-09-{10 + i:02d}T00:00:00",
+            "end_time": f"2026-09-{10 + i:02d}T01:00:00",
+            "app_link": "https://app.okareo.com/eval/x",
+            "mut_id": "m1",
+            "scenario_set_id": "s1",
+            "driver_id": "d1",
+            "model_metrics": {"mean_scores": {"c": 0.5}},
+        }
+
+    def _call(self, n=25, names=True, **kwargs):
+        import json
+        from unittest.mock import MagicMock, patch
+        from src.okareo_client import ResolvedProject, _reset_for_tests
+
+        _reset_for_tests()
+        tools = _register_and_get_tools()
+        maps = (
+            ({"m1": "Pandora Voice"}, {"s1": "billing"}, {"d1": "angry"})
+            if names else ({}, {}, {})
+        )
+        with patch("src.tools.simulations.get_okareo_client", return_value=MagicMock()), \
+             patch("src.tools.simulations.resolve_project",
+                   return_value=ResolvedProject(id="p1", name="Demos", basis="explicit")), \
+             patch("src.tools.simulations.find_test_runs",
+                   MagicMock(return_value=[self._sim(i) for i in range(n)])), \
+             patch("src.okareo_client.get_targets_cached", return_value=maps[0]), \
+             patch("src.okareo_client.get_scenarios_cached", return_value=maps[1]), \
+             patch("src.okareo_client.get_drivers_cached", return_value=maps[2]):
+            return json.loads(tools["list_simulations"](**kwargs))
+
+    def test_detailed_returns_twenty_not_five(self):
+        out = self._call(n=25, detail_level="detailed", limit=20)
+        assert out["count"] == 20
+        assert all("model_metrics" in s for s in out["simulations"])
+
+    def test_request_above_the_cap_is_capped_and_says_so(self):
+        out = self._call(n=40, detail_level="detailed", limit=30)
+        assert out["count"] == 20
+        assert "cap" in json.dumps(out).lower()
+
+    def test_limit_zero_at_detailed_is_also_capped(self):
+        out = self._call(n=40, detail_level="detailed", limit=0)
+        assert out["count"] == 20
+
+    def test_summary_is_not_capped_at_twenty(self):
+        out = self._call(n=40, limit=30)
+        assert out["count"] == 30
+
+    def test_comparison_entries_name_what_they_ran_against(self):
+        """FR-029: aggregates without provenance cannot qualify a comparison."""
+        out = self._call(n=3, detail_level="detailed", limit=20)
+        for entry in out["simulations"]:
+            assert entry["target"]["name"] == "Pandora Voice"
+            assert entry["scenario"]["name"] == "billing"
+            assert entry["driver"]["name"] == "angry"
+
+    def test_summary_carries_provenance_names_too(self):
+        entry = self._call(n=3)["simulations"][0]
+        assert entry["target"]["name"] == "Pandora Voice"
+        assert "id" not in entry["target"]
+
+    def test_detailed_adds_provenance_identifiers(self):
+        entry = self._call(n=3, detail_level="detailed")["simulations"][0]
+        assert entry["target"]["id"] == "m1"
+
+    def test_pagination_envelope(self):
+        out = self._call(n=40, limit=10)
+        assert out["total_count"] == 40
+        assert out["has_more"] is True
+        assert "list_simulations" in out["next_step"]
+
+    def test_offset_pages_through(self):
+        first = self._call(n=40, limit=10)["simulations"]
+        second = self._call(n=40, limit=10, offset=10)["simulations"]
+        assert {s["id"] for s in first}.isdisjoint({s["id"] for s in second})
+
+    def test_invalid_depth_rejected(self):
+        out = self._call(detail_level="full")
+        assert "full" in out["error"]
+
+
+class TestDriverAndTargetBounds:
+    """043 US3: these were the only listings with no bound of any kind, and
+    drivers are organization-shared so their count grows with the whole
+    organization's history rather than one project's.
+    """
+
+    def _drivers(self, n, voice=False):
+        out = []
+        for i in range(n):
+            d = {
+                "id": f"d-{i}",
+                "name": f"driver-{i}" if i % 2 == 0 else f"caller-{i}",
+                "model_id": "gpt-4",
+                "temperature": 0.6,
+                "time_created": "2026-09-10",
+                "voice": "alloy" if voice else None,
+                "voice_profile": "happy" if voice else None,
+                "voice_instructions": "be calm" if voice else None,
+                "language": "en" if voice else None,
+            }
+            out.append(d)
+        return out
+
+    def _muts(self, n):
+        return [
+            {
+                "id": f"m-{i}",
+                "name": f"target-{i}" if i % 2 == 0 else f"bot-{i}",
+                "time_created": "2026-09-10",
+                "tags": ["x"],
+                "models": {"custom_endpoint": {"max_parallel_requests": 4}},
+            }
+            for i in range(n)
+        ]
+
+    def _call_drivers(self, n=30, voice=False, **kwargs):
+        import json
+        from unittest.mock import MagicMock, patch
+        from okareo_api_client.api import default as pkg
+
+        tools = _register_and_get_tools()
+        mod = MagicMock()
+        mod.sync.return_value = self._drivers(n, voice)
+        with patch("src.tools.simulations.get_okareo_client", return_value=MagicMock()), \
+             patch.object(pkg, "get_all_drivers_v0_drivers_get", mod, create=True):
+            return json.loads(tools["list_drivers"](**kwargs))
+
+    def _call_targets(self, n=30, **kwargs):
+        import json
+        from unittest.mock import MagicMock, patch
+        from okareo_api_client.api import default as pkg
+        from src.okareo_client import ResolvedProject
+
+        tools = _register_and_get_tools()
+        mod = MagicMock()
+        mod.sync.return_value = self._muts(n)
+        with patch("src.tools.simulations.get_okareo_client", return_value=MagicMock()), \
+             patch("src.tools.simulations.resolve_project",
+                   return_value=ResolvedProject(id="p1", name="Demos", basis="explicit")), \
+             patch.object(
+                 pkg, "get_all_models_under_test_v0_models_under_test_get",
+                 mod, create=True):
+            return json.loads(tools["list_targets"](**kwargs))
+
+    def test_drivers_default_to_a_bounded_page(self):
+        out = self._call_drivers(n=30)
+        assert out["count"] == 20
+        assert out["total_count"] == 30
+        assert out["has_more"] is True
+        assert "list_drivers" in out["next_step"]
+
+    def test_drivers_limit_zero_returns_all(self):
+        assert self._call_drivers(n=30, limit=0)["count"] == 30
+
+    def test_drivers_offset_pages_through(self):
+        first = self._call_drivers(n=30, limit=10)["drivers"]
+        second = self._call_drivers(n=30, limit=10, offset=10)["drivers"]
+        assert {d["driver_id"] for d in first}.isdisjoint(
+            {d["driver_id"] for d in second}
+        )
+
+    def test_driver_name_filter_matches_partial(self):
+        out = self._call_drivers(n=30, name_contains="caller")
+        assert out["count"] > 0
+        assert all("caller" in d["name"] for d in out["drivers"])
+
+    def test_driver_name_filter_is_case_insensitive(self):
+        assert self._call_drivers(n=30, name_contains="CALLER")["count"] > 0
+
+    def test_empty_filter_result_is_distinguishable_from_empty_org(self):
+        out = self._call_drivers(n=30, name_contains="nothing-matches")
+        assert out["count"] == 0
+        assert out["total_count"] == 0
+        # The message must say a filter excluded them, not that none exist.
+        assert "nothing-matches" in json.dumps(out)
+
+    def test_text_driver_omits_null_voice_attributes(self):
+        # FR-015: four empty keys on every text driver is pure waste.
+        entry = self._call_drivers(n=3, voice=False)["drivers"][0]
+        for key in ("voice", "voice_profile", "voice_instructions", "language"):
+            assert key not in entry
+
+    def test_voice_driver_keeps_its_voice_attributes(self):
+        entry = self._call_drivers(n=3, voice=True, detail_level="detailed")["drivers"][0]
+        assert entry["voice"] == "alloy"
+        assert entry["language"] == "en"
+
+    def test_temperature_moves_to_detailed(self):
+        assert "temperature" not in self._call_drivers(n=3)["drivers"][0]
+        assert "temperature" in self._call_drivers(
+            n=3, detail_level="detailed"
+        )["drivers"][0]
+
+    def test_targets_default_to_a_bounded_page(self):
+        out = self._call_targets(n=30)
+        assert out["count"] == 20
+        assert out["total_count"] == 30
+        assert out["has_more"] is True
+
+    def test_targets_limit_zero_returns_all(self):
+        assert self._call_targets(n=30, limit=0)["count"] == 30
+
+    def test_target_name_filter_matches_partial(self):
+        out = self._call_targets(n=30, name_contains="bot")
+        assert out["count"] > 0
+        assert all("bot" in t["name"] for t in out["targets"])
+
+    def test_target_tags_move_to_detailed(self):
+        assert "tags" not in self._call_targets(n=3)["targets"][0]
+        assert "tags" in self._call_targets(
+            n=3, detail_level="detailed"
+        )["targets"][0]
+
+    def test_invalid_depth_rejected_on_both(self):
+        assert "full" in self._call_drivers(detail_level="full")["error"]
+        assert "full" in self._call_targets(detail_level="full")["error"]
+
+
+class TestRerunInheritance:
+    """043 US6: `based_on_run_id` resolved three fields — scenario, target,
+    driver — while its docstring said it reruns "keeping its configuration".
+    Changing the driver silently reset max_turns to 5 and dropped stop_check,
+    augmentation and the check list.
+
+    Assertions read `ModelUnderTest.run_test`'s kwargs: the single point where
+    the fully-resolved configuration is handed off, so they test what is
+    actually applied rather than what a response says was applied.
+    """
+
+    SIM_PARAMS = {
+        "repeats": 3,
+        "max_turns": 12,
+        "first_turn": "driver",
+        "stop_check": {"check_name": "agent_managed_task", "stop_on": False},
+        "checks_at_every_turn": True,
+        "turn_transition_time": 500,
+        "augmentation": {"noise": {"noise_profile": "cafeteria", "noise_snr_db": 10}},
+        "silence_timeout_ms": 10000,
+    }
+
+    def _original(self, sim_params=None, **overrides):
+        run = {
+            "id": "orig-run",
+            "name": "original",
+            "mut_id": "m1",
+            "scenario_set_id": "sc-1",
+            "driver_id": "d1",
+            "simulation_params": (
+                dict(self.SIM_PARAMS) if sim_params is None else dict(sim_params)
+            ),
+            "model_metrics": {
+                "check_ids": [
+                    {"name": "agent_managed_task", "id": "c1"},
+                    {"name": "reasoning-expectation-met", "id": "c2"},
+                ],
+            },
+        }
+        run.update(overrides)
+        return run
+
+    def _rerun(self, original=None, **kwargs):
+        """Start a rerun; return (response, applied) where `applied` holds the
+        kwargs handed to ModelUnderTest.run_test."""
+        import json
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock, patch
+        from okareo_api_client.api import default as pkg
+        from okareo import model_under_test as mut_mod
+        from src.okareo_client import ResolvedProject, _reset_for_tests
+
+        _reset_for_tests()
+        tools = _register_and_get_tools()
+        original = original or self._original()
+
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [
+            {"name": "billing-cases", "scenario_id": "sc-1", "scenario_count": 4},
+        ]
+        applied = {}
+
+        def _run_test(_self, **kw):
+            applied.update(kw)
+            return MagicMock(id="new-run", name="rerun", app_link="")
+
+        with patch("src.tools.simulations.get_okareo_client", return_value=MagicMock()), \
+             patch("src.tools.simulations.resolve_project",
+                   return_value=ResolvedProject(id="p1", name="Demos", basis="explicit")), \
+             patch("src.tools.simulations.find_test_runs",
+                   MagicMock(return_value=[original])), \
+             patch("src.tools.simulations._fetch_targets",
+                   return_value=[{"id": "m1", "name": "Pandora Voice", "type": "voice"}]), \
+             patch("src.tools.simulations._fetch_drivers",
+                   return_value=[{"id": "d1", "name": "confused-caller"}]), \
+             patch("src.tools.simulations.resolve_artifact_by_name",
+                   return_value=SimpleNamespace(
+                       id="m1", name="Pandora Voice",
+                       models={"voice": {"type": "voice", "model_id": "v1"}},
+                   )), \
+             patch.object(pkg, "get_scenario_sets_v0_scenario_sets_get", scen_mod, create=True), \
+             patch.object(mut_mod.ModelUnderTest, "run_test", _run_test), \
+             patch("src.tools.simulations._buffered_submit",
+                   lambda thunk, **kw: ("finished", thunk(), "new-run", "")):
+            raw = tools["run_simulation"](
+                name="rerun", based_on_run_id="orig-run", **kwargs
+            )
+        return json.loads(raw), applied
+
+    def _sim(self, applied):
+        """The simulation_params object actually submitted."""
+        return applied.get("simulation_params")
+
+    def test_inherits_the_full_recorded_configuration(self):
+        _, applied = self._rerun()
+        sim = self._sim(applied)
+        assert sim.max_turns == 12
+        assert sim.repeats == 3
+        assert sim.first_turn == "driver"
+        # The SDK normalises the dict into a StopConfig, so compare fields.
+        assert sim.stop_check.check_name == "agent_managed_task"
+        assert sim.stop_check.stop_on is False
+        assert sim.checks_at_every_turn is True
+        assert sim.turn_transition_time == 500
+        assert sim.augmentation == self.SIM_PARAMS["augmentation"]
+        assert sim.silence_timeout_ms == 10000
+
+    def test_inherits_the_check_list(self):
+        _, applied = self._rerun()
+        assert applied["checks"] == [
+            "agent_managed_task", "reasoning-expectation-met",
+        ]
+
+    def test_still_inherits_scenario_target_and_driver(self):
+        out, _ = self._rerun()
+        assert out["scenario"] == "billing-cases"
+        assert out["target"] == "Pandora Voice"
+        assert out["driver"] == "confused-caller"
+
+    def test_explicit_argument_overrides_exactly_one_field(self):
+        _, applied = self._rerun(max_turns=99)
+        sim = self._sim(applied)
+        assert sim.max_turns == 99
+        assert sim.repeats == 3
+        assert sim.stop_check.check_name == "agent_managed_task"
+        assert sim.augmentation == self.SIM_PARAMS["augmentation"]
+
+    def test_overriding_the_driver_keeps_the_rest(self):
+        """The exact case that used to reset max_turns to 5."""
+        out, applied = self._rerun(driver_name="angry-caller")
+        assert out["driver"] == "angry-caller"
+        sim = self._sim(applied)
+        assert sim.max_turns == 12
+        assert sim.stop_check is not None
+        assert sim.augmentation
+
+    def test_overriding_checks_replaces_the_inherited_list(self):
+        _, applied = self._rerun(checks=["latency"])
+        assert applied["checks"] == ["latency"]
+
+    def test_overriding_augmentation_replaces_rather_than_merges(self):
+        new_aug = {"noise": {"noise_profile": "street", "noise_snr_db": 5}}
+        _, applied = self._rerun(augmentation=new_aug)
+        assert self._sim(applied).augmentation == new_aug
+
+    def test_absent_recorded_field_is_not_asserted(self):
+        """research R11a: the record is sparse. A field the original never
+        recorded must fall to the tool default, not be claimed as inherited."""
+        _, applied = self._rerun(original=self._original(sim_params={"max_turns": 7}))
+        sim = self._sim(applied)
+        assert sim.max_turns == 7
+        assert sim.repeats == 1          # tool default, not a claim about the original
+        assert getattr(sim, "augmentation", None) is None
+
+    def test_unsettable_field_is_reported_not_silently_dropped(self):
+        original = self._original()
+        original["simulation_params"]["concurrent_ask_probability"] = 0.4
+        out, _ = self._rerun(original=original)
+        assert any(
+            "concurrent_ask_probability" in note
+            for note in out.get("rerun_notes", [])
+        )
+
+    def test_rerun_inherits_dropout_block(self):
+        dropout = {"dropout": {"probability": 0.3, "start_at_turn": 3}}
+        original = self._original(sim_params={"max_turns": 6, "augmentation": dropout})
+        out, applied = self._rerun(original=original, driver_name="angry-caller")
+        assert "error" not in out, out
+        sim = self._sim(applied)
+        assert sim.augmentation == dropout
+        assert sim.max_turns == 6
+
+    def test_rerun_inherited_block_is_validated(self):
+        """044 FR-009: an inherited block gets the same checks as a new one."""
+        original = self._original(sim_params={
+            "max_turns": 6,
+            "augmentation": {"cap": {"probability": 0.3, "start_at_turn": 3}},
+        })
+        out, applied = self._rerun(original=original)
+        assert out["field"] == "augmentation.cap.start_at_turn"
+        assert "cap.start_at_turn" in out["error"]
+        assert out["error"].endswith(
+            "(inherited from run 'orig-run'; pass augmentation to override)"
+        )
+        assert applied == {}
+
+    def test_rerun_start_at_turn_checked_against_inherited_max_turns(self):
+        """The early pass cannot know max_turns on a rerun; the inherited 8
+        must be what start_at_turn=7 is measured against."""
+        original = self._original(sim_params={"max_turns": 8})
+        out, applied = self._rerun(
+            original=original,
+            augmentation={"dropout": {"probability": 0.3, "start_at_turn": 7}},
+        )
+        assert "error" not in out, out
+        assert self._sim(applied).max_turns == 8
+
+    def test_rerun_caller_block_beyond_inherited_max_turns_has_no_suffix(self):
+        original = self._original(sim_params={"max_turns": 4})
+        out, applied = self._rerun(
+            original=original,
+            augmentation={"dropout": {"probability": 0.3, "start_at_turn": 7}},
+        )
+        assert out["field"] == "augmentation.dropout.start_at_turn"
+        assert "max_turns=4" in out["error"]
+        assert "inherited" not in out["error"]
+        assert applied == {}
+
+    def test_rerun_does_not_request_row_level_metrics(self):
+        """research R12: simulation_params and check_ids both survive the flag."""
+        import json
+        from unittest.mock import MagicMock, patch
+        from okareo_api_client.api import default as pkg
+        from src.okareo_client import ResolvedProject, _reset_for_tests
+
+        _reset_for_tests()
+        tools = _register_and_get_tools()
+        calls = []
+
+        def _find(_ok, payload):
+            calls.append(payload)
+            return [self._original()]
+
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [
+            {"name": "billing-cases", "scenario_id": "sc-1", "scenario_count": 4},
+        ]
+        with patch("src.tools.simulations.get_okareo_client", return_value=MagicMock()), \
+             patch("src.tools.simulations.resolve_project",
+                   return_value=ResolvedProject(id="p1", name="Demos", basis="explicit")), \
+             patch("src.tools.simulations.find_test_runs", _find), \
+             patch("src.tools.simulations._fetch_targets",
+                   return_value=[{"id": "m1", "name": "Pandora Voice", "type": "voice"}]), \
+             patch("src.tools.simulations._fetch_drivers",
+                   return_value=[{"id": "d1", "name": "confused-caller"}]), \
+             patch.object(pkg, "get_scenario_sets_v0_scenario_sets_get", scen_mod, create=True), \
+             patch("src.tools.simulations._buffered_submit",
+                   lambda *a, **kw: ("running", None, "new-run", "")):
+            json.loads(tools["run_simulation"](name="r", based_on_run_id="orig-run"))
+        assert calls and all(p.return_model_metrics is False for p in calls)
+
+
+class TestSimulationListingPointsAtRerun:
+    def test_next_step_names_the_run_retrieval(self):
+        import json
+        from unittest.mock import MagicMock, patch
+        from src.okareo_client import ResolvedProject, _reset_for_tests
+
+        _reset_for_tests()
+        tools = _register_and_get_tools()
+        runs = [{
+            "id": "sim-1", "name": "sim", "status": "FINISHED",
+            "test_data_point_count": 4, "start_time": "2026-09-10T00:00:00",
+            "mut_id": "m1", "scenario_set_id": "s1", "driver_id": "d1",
+            "model_metrics": {},
+        }]
+        with patch("src.tools.simulations.get_okareo_client", return_value=MagicMock()), \
+             patch("src.tools.simulations.resolve_project",
+                   return_value=ResolvedProject(id="p1", name="Demos", basis="explicit")), \
+             patch("src.tools.simulations.find_test_runs", MagicMock(return_value=runs)), \
+             patch("src.okareo_client.get_targets_cached", return_value={}), \
+             patch("src.okareo_client.get_scenarios_cached", return_value={}), \
+             patch("src.okareo_client.get_drivers_cached", return_value={}):
+            out = json.loads(tools["list_simulations"]())
+        assert "get_test_run_results" in out["rerun_hint"]
+        assert "rerun" in out["rerun_hint"]

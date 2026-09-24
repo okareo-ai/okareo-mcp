@@ -55,10 +55,11 @@ class TestCategoryGrouping:
 
         result = json.loads(_tests_tools()["list_checks"](limit=0))
 
+        # 043 FR-024: categories carry names; entries live once in `checks`.
         cats = result["checks_by_category"]
-        assert [c["name"] for c in cats["Output Validation"]] == ["is_json"]
-        assert [c["name"] for c in cats["Performance"]] == ["latency"]
-        assert [c["name"] for c in cats["Output Quality"]] == ["fluency"]
+        assert cats["Output Validation"] == ["is_json"]
+        assert cats["Performance"] == ["latency"]
+        assert cats["Output Quality"] == ["fluency"]
         assert result["uncategorized"] == []
 
     @patch("src.tools.tests.get_okareo_client")
@@ -73,8 +74,7 @@ class TestCategoryGrouping:
         result = json.loads(_tests_tools()["list_checks"](limit=0))
 
         assert result["checks_by_category"] == {}
-        names = {c["name"] for c in result["uncategorized"]}
-        assert names == {"custom_check", "other"}
+        assert set(result["uncategorized"]) == {"custom_check", "other"}
 
     @patch("src.tools.tests.get_okareo_client")
     def test_multi_category_check_appears_under_each(self, mock_client):
@@ -90,9 +90,10 @@ class TestCategoryGrouping:
         result = json.loads(_tests_tools()["list_checks"](limit=0))
 
         cats = result["checks_by_category"]
-        assert [c["name"] for c in cats["Voice Quality"]] == ["wer"]
-        assert [c["name"] for c in cats["Output Quality"]] == ["wer"]
-        # The duplicate-name semantics are stated for the co-pilot.
+        assert cats["Voice Quality"] == ["wer"]
+        assert cats["Output Quality"] == ["wer"]
+        # One entry, referenced twice -- not serialized twice (FR-024).
+        assert len([c for c in result["checks"] if c["name"] == "wer"]) == 1
         assert "note" in result
 
     @patch("src.tools.tests.get_okareo_client")
@@ -110,7 +111,8 @@ class TestCategoryGrouping:
 
         result = json.loads(_tests_tools()["list_checks"](limit=0))
 
-        entry = result["checks_by_category"]["Output Validation"][0]
+        assert result["checks_by_category"]["Output Validation"] == ["is_json"]
+        entry = next(c for c in result["checks"] if c["name"] == "is_json")
         assert entry["name"] == "is_json"
         assert entry["description"] == "Valid JSON?"
         assert entry["output_data_type"] == "bool"
@@ -127,8 +129,9 @@ class TestCategoryGrouping:
         result = json.loads(_tests_tools()["list_checks"](all_versions=True))
 
         okareo.get_all_checks.assert_called_once_with(all_versions=True)
-        entries = result["checks_by_category"]["Output Quality"]
-        assert sorted(e["version"] for e in entries) == [1, 2]
+        # The category names the check once; both versions live in `checks`.
+        assert result["checks_by_category"]["Output Quality"] == ["my-check"]
+        assert sorted(c["version"] for c in result["checks"]) == [1, 2]
 
     @patch("src.tools.tests.get_okareo_client")
     def test_empty_catalog_is_usable(self, mock_client):
@@ -157,3 +160,64 @@ class TestCategoryGrouping:
             len(v) for v in result["checks_by_category"].values()
         ) + len(result["uncategorized"])
         assert total == 5
+
+
+class TestCheckCategoryDeduplication:
+    """043 US5 / FR-024: a check in three categories had its full entry —
+    description included — serialized three times."""
+
+    def _call(self, **kwargs):
+        import json
+        from unittest.mock import MagicMock, patch
+        from mcp.server.fastmcp import FastMCP
+        from src.tools.tests import register_tools
+
+        mcp = FastMCP("test")
+        register_tools(mcp)
+        tools = {k: t.fn for k, t in mcp._tool_manager._tools.items()}
+
+        def _check(name, cats, desc):
+            c = MagicMock()
+            c.name = name
+            c.description = desc
+            c.output_data_type = "bool"
+            c.additional_properties = {
+                "tags": [f"__category:{c_}" for c_ in cats]
+            }
+            return c
+
+        checks = [
+            _check("multi", ["Voice", "Quality", "Safety"], "D" * 200),
+            _check("single", ["Quality"], "S" * 200),
+            _check("none", [], "N" * 200),
+        ]
+        okareo = MagicMock()
+        okareo.get_all_checks.return_value = checks
+        with patch("src.tools.tests.get_okareo_client", return_value=okareo):
+            return json.loads(tools["list_checks"](**kwargs))
+
+    def test_multi_category_check_is_serialized_once(self):
+        out = self._call()
+        blob = json.dumps(out)
+        # The long description must appear exactly once, not once per category.
+        assert blob.count("D" * 200) == 1
+
+    def test_categories_still_reference_the_check(self):
+        out = self._call()
+        for cat in ("Voice", "Quality", "Safety"):
+            assert "multi" in json.dumps(out["checks_by_category"][cat])
+
+    def test_every_check_is_reachable(self):
+        out = self._call()
+        names = {c["name"] for c in out["checks"]}
+        assert names == {"multi", "single", "none"}
+
+    def test_uncategorized_checks_are_still_reported(self):
+        out = self._call()
+        assert "none" in json.dumps(out["uncategorized"])
+
+    def test_check_details_are_intact(self):
+        out = self._call()
+        entry = next(c for c in out["checks"] if c["name"] == "multi")
+        assert entry["description"] == "D" * 200
+        assert entry["output_data_type"] == "bool"
