@@ -1982,6 +1982,29 @@ class TestRerunInheritance:
         assert sim.augmentation == dropout
         assert sim.max_turns == 6
 
+    def test_rerun_inherits_window(self):
+        """045 US4: both ends of the window survive a re-run."""
+        block = {"dropout": {"probability": 1.0, "start_at_turn": 3, "end_at_turn": 3}}
+        original = self._original(sim_params={"max_turns": 6, "augmentation": block})
+        out, applied = self._rerun(original=original, driver_name="angry-caller")
+        assert "error" not in out, out
+        assert self._sim(applied).augmentation == block
+
+    def test_rerun_inherited_inverted_window_is_rejected(self):
+        original = self._original(sim_params={
+            "max_turns": 6,
+            "augmentation": {
+                "dropout": {"probability": 1.0, "start_at_turn": 4, "end_at_turn": 2},
+            },
+        })
+        out, applied = self._rerun(original=original)
+        assert out["field"] == "augmentation.dropout.end_at_turn"
+        assert "would never fire" in out["error"]
+        assert out["error"].endswith(
+            "(inherited from run 'orig-run'; pass augmentation to override)"
+        )
+        assert applied == {}
+
     def test_rerun_inherited_block_is_validated(self):
         """044 FR-009: an inherited block gets the same checks as a new one."""
         original = self._original(sim_params={

@@ -1,5 +1,7 @@
 """T021: confirms the server boots with Cloud-Run-style env (PORT only),
-binds 0.0.0.0:$PORT, and serves the PRM doc within 10 s of process start.
+binds 0.0.0.0:$PORT, serves the PRM doc within 10 s of process start, and
+(046) names the authorization server there exactly as the AS document's
+``issuer`` names itself.
 
 This test spawns the actual ``okareo-mcp`` CLI as a subprocess — it's the
 closest in-test we get to "does the container shape work" without invoking
@@ -18,6 +20,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from tests.integration.oauth_discovery import authorization_server_metadata_url
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -35,7 +39,7 @@ def _pick_free_port() -> int:
     shutil.which("uv") is None,
     reason="uv not on PATH — skip subprocess boot test",
 )
-def test_container_honors_port_env_and_serves_prm_within_10s():
+def test_container_honors_port_env_serves_prm_within_10s_and_issuer_matches():
     port = _pick_free_port()
     env = {
         **os.environ,
@@ -79,6 +83,17 @@ def test_container_honors_port_env_and_serves_prm_within_10s():
                     body = resp.json()
                     # Sanity: PRM should advertise our test URL.
                     assert "resource" in body, body
+                    # 046: the real process wires src/server.py together; the
+                    # in-process tests do not. A strict client compares these
+                    # two strings exactly (RFC 8414 §3.3).
+                    advertised = body["authorization_servers"][0]
+                    as_doc = httpx.get(
+                        authorization_server_metadata_url(advertised),
+                        follow_redirects=True,
+                        timeout=1.0,
+                    )
+                    assert as_doc.status_code == 200, as_doc.text
+                    assert as_doc.json()["issuer"] == advertised
                     return  # success
             except (httpx.HTTPError, httpx.ConnectError) as exc:
                 last_error = exc

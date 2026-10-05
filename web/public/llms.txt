@@ -17,9 +17,12 @@ The hosted (remote) MCP endpoint is `https://tools.okareo.com/mcp`. It speaks st
 }
 ```
 
+VS Code's `.vscode/mcp.json` uses `servers` instead of `mcpServers`.
+
 ## Documentation
 
 - [Okareo MCP introduction](https://docs.okareo.com/docs/mcp/introduction): Overview, setup, and supported copilots.
+- [Okareo MCP configuration](https://docs.okareo.com/mcp/configuration): Per-client setup, including GitHub Copilot (VS Code and the Copilot CLI) and Slackbot, the API-key fallback, and network access.
 - [Okareo docs](https://docs.okareo.com): Concepts — scenarios, checks, generation models, simulations, drivers, targets, and analytics.
 - [Okareo app](https://app.okareo.com): Web UI for projects, test runs, and dashboards.
 
@@ -91,7 +94,7 @@ The hosted (remote) MCP endpoint is `https://tools.okareo.com/mcp`. It speaks st
 ## Tools — Tenant Management (remote MCP only)
 
 - `list_tenants`: List every Okareo organization you have access to in this MCP session.
-- `switch_tenant`: Change which Okareo organization subsequent tool calls operate against.
+- `switch_tenant`: Doesn't change the active organization; returns how to reconnect and pick another one at sign-in.
 
 ## Tools — Documentation & Templates
 

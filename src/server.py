@@ -47,6 +47,7 @@ from pydantic import AnyHttpUrl
 
 from src.analytics import emit_tool_event, init_analytics, shutdown_analytics
 from src.analytics_context import call_scope
+from src.auth.protected_resource import OkareoFastMCP
 from src.error_handling import format_tool_error
 from src.key_registry import scan_provider_keys
 from src.okareo_client import create_okareo_client
@@ -419,17 +420,16 @@ _INSTRUCTIONS = (
     "checks without re-running the model — omit `checks` to reuse the run's own.\n"
     "- For voice ingestion, each conversation needs a call_id plus a transcript or an "
     "audio reference; invalid ones are reported in a 'rejected' list, not failed wholesale.\n\n"
-    "TENANT SELECTION (OAuth sessions only):\n"
-    "- If a user is associated with more than one Okareo organization (Frontegg "
-    "tenant), call list_tenants to see their options and switch_tenant(tenant_id) "
-    "to change the active one. The selection is SESSION-SCOPED: if this "
-    "conversation is being resumed after the MCP transport was closed (e.g., the "
-    "copilot restarted), inspect the conversation transcript for the most recent "
-    "switch_tenant call and re-issue it BEFORE the next tenant-scoped tool call. "
-    "Every list_tenants response carries active_tenant_id and "
-    "active_tenant_source; use these to confirm the override is in effect before "
-    "assuming so. On Bearer-API-key sessions both tenant tools return "
-    "tenant_selection_requires_oauth — the API-key bearer path is single-org."
+    "ORGANIZATIONS (OAuth sessions only):\n"
+    "- The active Okareo organization is fixed when the user signs in to this MCP; "
+    "no tool changes it. If a user belongs to more than one organization (Frontegg "
+    "tenant), call list_tenants to show them which organizations they have and which "
+    "one is active (active_tenant_id, and is_current on each entry). "
+    "switch_tenant(tenant_id) does NOT switch: it returns instructions to reconnect "
+    "the Okareo MCP from the copilot and pick a different organization at sign-in. "
+    "Relay those instructions; do not retry the call or assume the organization "
+    "changed. On Bearer-API-key sessions both tenant tools return "
+    "tenant_selection_requires_oauth — an API key is tied to one organization."
 )
 
 
@@ -527,7 +527,12 @@ if _HTTP_MODE:
     _fastmcp_kwargs["stateless_http"] = True
     _fastmcp_kwargs["json_response"] = True
 
-mcp = FastMCP("okareo-mcp", **_fastmcp_kwargs)
+# OkareoFastMCP serves the protected-resource document itself so that its
+# `authorization_servers` is identical to the AS document's `issuer` — the SDK
+# renders it with a trailing slash, and RFC 8414 §3.3 clients (Copilot CLI)
+# refuse the mismatch (046). In stdio mode there is no such document and the
+# subclass behaves exactly like FastMCP.
+mcp = OkareoFastMCP("okareo-mcp", **_fastmcp_kwargs)
 
 if _HTTP_MODE:
     # OAuth Proxy wiring (2026-05-16 redesign):

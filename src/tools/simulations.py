@@ -1986,11 +1986,14 @@ def register_tools(mcp: FastMCP) -> None:
           - noise: noise_profile (non-empty string) AND noise_snr_db (number)
             required. seed optional.
 
-        `start_at_turn` (int >= 1, default 1) is optional on directed_speech,
-        secondary_speaker, backchannel, barge_in and dropout, and not accepted by
-        cap or noise. It holds the strategy off until that caller turn: the
-        agent's greeting is turn 0 and the first caller turn is turn 1. It must
-        not exceed max_turns, or the strategy would never fire.
+        `start_at_turn` (int >= 1, default 1) and `end_at_turn` (int >= 1,
+        default none) are optional on directed_speech, secondary_speaker,
+        backchannel, barge_in and dropout, and not accepted by cap or noise.
+        Together they are the window the strategy may fire in. Both count the
+        agent's turns that carried words, which is not the transcript's turn
+        numbering. `end_at_turn` must not be before `start_at_turn`;
+        `start_at_turn` must not exceed max_turns. To fire on one turn only, set
+        both to that turn and probability to 1.0.
 
         The SDK's spellings are accepted too: `profile` / `snr_db` for noise, and
         `voice` / `prompt` / `reverb_preset` for secondary_speaker — but not both
@@ -2001,13 +2004,18 @@ def register_tools(mcp: FastMCP) -> None:
         A dropped turn leaves no message in the transcript;
         `get_conversation_transcript` reports those turns as `dropped_turns`.
 
-        Two limits worth knowing: dropout, barge_in and backchannel only fire on
-        connections that support them (phone, SIP and WebRTC Targets) — OpenAI and
-        Deepgram realtime Targets run without them. And a `seed` makes every
-        repeat of the run fire on the same turns.
+        Two limits worth knowing. Every voice Target takes an augmentation block,
+        but its connection decides which strategies can fire. dropout needs a
+        connection where the caller can stay silent: phone, SIP and WebRTC
+        Targets. barge_in and backchannel need one where the caller can
+        interrupt: phone, SIP and WebRTC Targets, except a SIP Target dialed
+        directly (sip_mode "direct"). OpenAI and Deepgram realtime Targets carry
+        none of the three. A strategy the connection cannot carry is left out and
+        the run still succeeds. And a `seed` makes every repeat of the run fire
+        on the same turns.
 
         For copy-paste examples and the full reference, call
-        `get_templates(["voice_augmentations"])`.
+        `get_templates("voice_augmentations")`.
 
         Args:
             name: Human-readable name for this simulation run.

@@ -451,3 +451,205 @@ class TestPreflightMaxTurns:
         assert preflight_augmentation(
             {"dropout": {"probability": 0.3, "start_at_turn": 50}}, None
         ) is None
+
+
+# ---------------------------------------------------------------------------
+# 045 — end_at_turn closes the window
+# ---------------------------------------------------------------------------
+
+class TestEndAtTurn:
+    @pytest.mark.parametrize("strategy,config", _START_AT_TURN_STRATEGIES)
+    @pytest.mark.parametrize("window", [
+        {"end_at_turn": 1},
+        {"start_at_turn": 3, "end_at_turn": 3},
+        {"start_at_turn": 2, "end_at_turn": 4},
+        {"end_at_turn": None},
+        {"start_at_turn": 2, "end_at_turn": None},
+    ])
+    def test_valid_window_accepted(self, strategy, config, window):
+        assert validate_augmentation({strategy: {**config, **window}}) == []
+
+    @pytest.mark.parametrize("strategy,config", _START_AT_TURN_STRATEGIES)
+    def test_end_beyond_max_turns_accepted(self, strategy, config):
+        """A window that ends after the call does simply stays open (FR-005)."""
+        block = {strategy: {**config, "end_at_turn": 9}}
+        assert preflight_augmentation(block, 5) is None
+
+    @pytest.mark.parametrize("strategy,config", _START_AT_TURN_STRATEGIES)
+    @pytest.mark.parametrize("value", [0, -1, 2.5, True, "3"])
+    def test_invalid_value_rejected(self, strategy, config, value):
+        errors = validate_augmentation({strategy: {**config, "end_at_turn": value}})
+        assert errors == [{
+            "error": (
+                f"Invalid {strategy}.end_at_turn={value!r}. "
+                "Must be an int >= 1, or null for no end."
+            ),
+            "field": f"augmentation.{strategy}.end_at_turn",
+            "strategy": strategy,
+        }]
+
+    @pytest.mark.parametrize("strategy,config", _START_AT_TURN_STRATEGIES)
+    def test_end_before_start_rejected(self, strategy, config):
+        errors = validate_augmentation(
+            {strategy: {**config, "start_at_turn": 4, "end_at_turn": 2}}
+        )
+        assert errors == [{
+            "error": (
+                f"Invalid {strategy} window: end_at_turn=2 is before "
+                f"start_at_turn=4, so {strategy} would never fire. "
+                "Raise end_at_turn or lower start_at_turn."
+            ),
+            "field": f"augmentation.{strategy}.end_at_turn",
+            "strategy": strategy,
+        }]
+
+    def test_end_one_below_start_rejected(self):
+        errors = validate_dropout(
+            {"probability": 0.3, "start_at_turn": 2, "end_at_turn": 1}
+        )
+        assert errors[0]["field"] == "augmentation.dropout.end_at_turn"
+
+    def test_invalid_start_reports_only_the_start(self):
+        """FR-006: the window is not judged against a start that is invalid."""
+        errors = validate_dropout(
+            {"probability": 0.3, "start_at_turn": 0, "end_at_turn": 2}
+        )
+        assert [e["field"] for e in errors] == ["augmentation.dropout.start_at_turn"]
+
+    def test_invalid_start_and_malformed_end_are_both_named(self):
+        errors = validate_dropout(
+            {"probability": 0.3, "start_at_turn": 0, "end_at_turn": 0}
+        )
+        assert [e["field"] for e in errors] == [
+            "augmentation.dropout.start_at_turn",
+            "augmentation.dropout.end_at_turn",
+        ]
+
+    def test_start_at_turn_message_has_no_transcript_numbering(self):
+        errors = validate_dropout({"probability": 0.3, "start_at_turn": 0})
+        assert errors[0]["error"] == (
+            "Invalid dropout.start_at_turn=0. Must be an int >= 1."
+        )
+
+    def test_cap_does_not_take_end_at_turn(self):
+        errors = validate_augmentation(
+            {"cap": {"probability": 0.3, "end_at_turn": 2}}
+        )
+        assert errors[0]["error"] == (
+            "Unknown field cap.end_at_turn. "
+            "cap accepts: ['pause_ms', 'probability']."
+        )
+        assert errors[0]["field"] == "augmentation.cap.end_at_turn"
+
+    def test_noise_does_not_take_end_at_turn(self):
+        errors = validate_augmentation({"noise": {
+            "noise_profile": "cafeteria", "noise_snr_db": 10, "end_at_turn": 2,
+        }})
+        assert errors[0]["error"].startswith("Unknown field noise.end_at_turn.")
+
+    def test_preflight_returns_the_window_error(self):
+        err = preflight_augmentation(
+            {"dropout": {"probability": 1.0, "start_at_turn": 4, "end_at_turn": 2}}, 5
+        )
+        assert err["field"] == "augmentation.dropout.end_at_turn"
+        assert err["strategy"] == "dropout"
+
+    def test_start_beyond_max_turns_rule_is_unchanged(self):
+        err = preflight_augmentation(
+            {"dropout": {"probability": 0.3, "start_at_turn": 6, "end_at_turn": 8}}, 5
+        )
+        assert err["field"] == "augmentation.dropout.start_at_turn"
+        assert "beyond max_turns=5" in err["error"]
+
+
+class TestWindowGuidance:
+    """FR-008, FR-009: the description and the guidance state the window and
+    never describe it in transcript numbering."""
+
+    @staticmethod
+    def _template() -> str:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        return (root / "src/templates/voice_augmentations.md").read_text()
+
+    @staticmethod
+    def _docstring() -> str:
+        from mcp.server.fastmcp import FastMCP
+
+        from src.tools.simulations import register_tools
+
+        mcp = FastMCP("test")
+        register_tools(mcp)
+        return mcp._tool_manager._tools["run_simulation"].fn.__doc__
+
+    def _text(self, source: str) -> str:
+        # Wrapped prose: compare on single spaces, not on where a line broke.
+        return " ".join(getattr(self, source)().split())
+
+    @pytest.mark.parametrize("source", ["_template", "_docstring"])
+    @pytest.mark.parametrize("needle", ["end_at_turn", "carried words", "probability"])
+    def test_states_the_window(self, source, needle):
+        assert needle in self._text(source)
+
+    @pytest.mark.parametrize("source", ["_template", "_docstring"])
+    def test_never_describes_transcript_numbering(self, source):
+        assert "turn 0" not in self._text(source)
+
+    def test_every_windowed_strategy_table_has_the_row(self):
+        assert self._template().count("| `end_at_turn` |") == 5
+
+
+# ---------------------------------------------------------------------------
+# 045 amendment A1 — which connection carries which strategy
+# ---------------------------------------------------------------------------
+
+# Transcribed from okareo-server @ 93b41943 (specs/045-.../research.md R10):
+# each strategy's `required_capability` against each edge's `capabilities`.
+# The MCP does not validate against this; it only documents it.
+_CONNECTION_MAP = {
+    "Phone (Twilio, Vonage, Telnyx)": ("yes", "yes", "yes"),
+    "SIP": ("yes", "yes", "yes"),
+    'SIP dialed directly (`sip_mode: "direct"`)': ("yes", "yes", "no"),
+    "WebRTC": ("yes", "yes", "yes"),
+    "OpenAI and Deepgram realtime": ("yes", "no", "no"),
+}
+
+
+class TestConnectionGuidance:
+    """FR-014: one statement of which connection carries which strategy."""
+
+    @staticmethod
+    def _limits_section() -> str:
+        template = TestWindowGuidance._template()
+        return template.split("## Two limits worth knowing", 1)[1].split("\n## ", 1)[0]
+
+    def test_introduction_no_longer_names_two_edge_types(self):
+        assert "edge types: twilio, sip" not in TestWindowGuidance._template()
+
+    def test_table_matches_the_transcribed_map(self):
+        rows = {}
+        for line in self._limits_section().splitlines():
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) == 4 and cells[1] in ("yes", "no"):
+                rows[cells[0]] = tuple(cells[1:])
+        assert rows == _CONNECTION_MAP
+
+    def test_connections_are_stated_once(self):
+        """No second list of connections elsewhere in the template."""
+        template = TestWindowGuidance._template()
+        outside = template.replace(self._limits_section(), "")
+        assert "Vonage" not in outside
+        assert "Deepgram realtime" not in outside
+
+    @pytest.mark.parametrize("source", ["_template", "_docstring"])
+    def test_names_the_direct_sip_exception(self, source):
+        text = " ".join(getattr(TestWindowGuidance, source)().split())
+        assert "sip_mode" in text
+        assert "direct" in text
+
+    @pytest.mark.parametrize("source", ["_template", "_docstring"])
+    def test_says_an_unsupported_strategy_is_left_out(self, source):
+        text = " ".join(getattr(TestWindowGuidance, source)().split())
+        assert "left out" in text
+        assert "still succeeds" in text

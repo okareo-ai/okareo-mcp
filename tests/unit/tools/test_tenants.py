@@ -165,7 +165,11 @@ class TestListTenantsErrors:
         payload = asyncio.run(run())
         assert "error" in payload
         assert payload["error"]["code"] == "tenant_selection_requires_oauth"
-        assert "docs_url" in payload["error"].get("data", {})
+        # 046: the previous link (docs.okareo.com/docs/mcp/remote) returns 404.
+        assert (
+            payload["error"]["data"]["docs_url"]
+            == "https://docs.okareo.com/mcp/configuration#oauth-sign-in"
+        )
 
     def test_frontegg_lookup_failure_returns_tool_error(self):
         cred = _make_oauth_credential()
@@ -202,7 +206,7 @@ class TestSwitchTenantGuidance:
         payload = asyncio.run(run())
         assert payload["action"] == "reauthenticate_to_change_tenant"
         assert payload["current_tenant_id"] == "t-1"
-        assert "docs_url" in payload
+        assert payload["docs_url"] == "https://docs.okareo.com/mcp/configuration#oauth-sign-in"
         # No error, no active-tenant change reported.
         assert "error" not in payload
         assert "active_tenant_id" not in payload

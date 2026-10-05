@@ -36,7 +36,7 @@ from src.auth.frontegg_user_info import (
     get_user_tenants,
 )
 
-_DOCS_URL = "https://docs.okareo.com/docs/mcp/remote#oauth-sign-in"
+_DOCS_URL = "https://docs.okareo.com/mcp/configuration#oauth-sign-in"
 
 
 def _error(code: str, message: str, data: dict[str, Any] | None = None) -> str:
@@ -132,15 +132,18 @@ def register_tools(mcp: FastMCP) -> None:
         ),
     )
     async def switch_tenant(tenant_id: str) -> str:
-        """Change which Okareo organization your session operates against.
+        """Explain how to change the Okareo organization this session works in.
+        Does not switch it.
 
-        Organization selection now happens **during sign-in** (feature 030):
-        when you connect the Okareo MCP you choose which organization to
-        authorize, and the credential this session uses is already scoped to
-        it. This tool therefore no longer changes the active organization — to
-        switch, reconnect/re-authenticate the Okareo MCP from your copilot and
-        select a different organization when prompted. Use ``list_tenants`` to
-        see which organization is currently active.
+        The organization is chosen **during sign-in** (feature 030): when you
+        connect the Okareo MCP you pick which organization to authorize, and
+        the credential this session uses is scoped to it. This tool returns
+        the steps to change it — reconnect/re-authenticate the Okareo MCP from
+        your copilot and select a different organization when prompted — and
+        the current organization's id. Use ``list_tenants`` to see which
+        organizations you have and which one is active. On Bearer-API-key
+        sessions returns ``tenant_selection_requires_oauth``: an API key is
+        tied to one organization.
         """
         credential = get_session_credential_optional()
         if credential is None or credential.kind == "api_key":

@@ -61,29 +61,32 @@ KNOWN_STRATEGIES: tuple[str, ...] = (
 # rest, so a setting outside this set would look accepted and do nothing.
 # Transcribed from okareo-server
 # fastapi-web/app/services/testruns/execution/voice/augmentation/parse.py
-# ::_normalize_strategy_config @ 157010dc, including the alias spellings it
+# ::_normalize_strategy_config @ 93b41943, including the alias spellings it
 # normalizes. Re-check that function when the Okareo server adds a setting.
 ALLOWED_FIELDS: dict[str, frozenset[str]] = {
     "cap": frozenset({"probability", "pause_ms"}),
     "directed_speech": frozenset({
-        "prompt", "probability", "start_at_turn", "lpf_cutoff_hz", "gain_db",
-        "sample_rate", "reverb_preset",
+        "prompt", "probability", "start_at_turn", "end_at_turn",
+        "lpf_cutoff_hz", "gain_db", "sample_rate", "reverb_preset",
     }),
     "secondary_speaker": frozenset({
-        "probability", "start_at_turn", "secondary_voice", "secondary_prompt",
+        "probability", "start_at_turn", "end_at_turn", "secondary_voice",
+        "secondary_prompt",
         "secondary_voice_instructions", "lpf_cutoff_hz", "gain_db",
         "inter_speaker_pause_ms", "sample_rate", "secondary_reverb_preset",
         "voice", "prompt", "reverb_preset",
     }),
     "backchannel": frozenset({
-        "utterance", "probability", "start_at_turn", "min_offset_ms",
-        "max_offset_ms", "seed",
+        "utterance", "probability", "start_at_turn", "end_at_turn",
+        "min_offset_ms", "max_offset_ms", "seed",
     }),
     "barge_in": frozenset({
-        "prompt", "probability", "start_at_turn", "min_offset_ms",
-        "max_offset_ms", "seed",
+        "prompt", "probability", "start_at_turn", "end_at_turn",
+        "min_offset_ms", "max_offset_ms", "seed",
     }),
-    "dropout": frozenset({"probability", "start_at_turn", "seed"}),
+    "dropout": frozenset({
+        "probability", "start_at_turn", "end_at_turn", "seed",
+    }),
     "noise": frozenset({
         "noise_profile", "noise_snr_db", "seed", "profile", "snr_db",
     }),
@@ -314,11 +317,50 @@ def _validate_start_at_turn(strategy: str, config: dict) -> list[dict]:
     return [_err(
         strategy,
         "start_at_turn",
-        (
-            f"Invalid {strategy}.start_at_turn={v!r}. Must be an int >= 1 "
-            "(turn 0 is the agent's greeting)."
-        ),
+        f"Invalid {strategy}.start_at_turn={v!r}. Must be an int >= 1.",
     )]
+
+
+def _validate_window(strategy: str, config: dict) -> list[dict]:
+    """`start_at_turn` and `end_at_turn`: the window a strategy may fire in.
+
+    Both ends count the agent's turns that carried words, not the transcript's
+    turn numbers. Mirrors okareo-server strategies.py::validated_start_at_turn
+    and ::validated_end_at_turn @ 93b41943.
+
+    `end_at_turn` is not compared with max_turns: a window that ends after the
+    call does simply stays open. Only a window that could never fire is
+    refused, and only against a start that is itself valid.
+    """
+    errors = _validate_start_at_turn(strategy, config)
+    end = config.get("end_at_turn")
+    if end is None:
+        # Absent, or an explicit null: no end. Forwarded as written.
+        return errors
+    if not (_is_int(end) and end >= 1):
+        errors.append(_err(
+            strategy,
+            "end_at_turn",
+            (
+                f"Invalid {strategy}.end_at_turn={end!r}. "
+                "Must be an int >= 1, or null for no end."
+            ),
+        ))
+        return errors
+    if errors:
+        return errors
+    start = config.get("start_at_turn", 1)
+    if end < start:
+        errors.append(_err(
+            strategy,
+            "end_at_turn",
+            (
+                f"Invalid {strategy} window: end_at_turn={end} is before "
+                f"start_at_turn={start}, so {strategy} would never fire. "
+                "Raise end_at_turn or lower start_at_turn."
+            ),
+        ))
+    return errors
 
 
 def _validate_seed(strategy: str, config: dict) -> list[dict]:
@@ -353,7 +395,7 @@ def validate_directed_speech(config: dict) -> list[dict]:
     return (
         _validate_probability(s, config)
         + _validate_lpf_gain_sr(s, config)
-        + _validate_start_at_turn(s, config)
+        + _validate_window(s, config)
     )
 
 
@@ -382,7 +424,7 @@ def validate_secondary_speaker(config: dict) -> list[dict]:
                 ),
             ))
     errors.extend(_validate_lpf_gain_sr(s, config))
-    errors.extend(_validate_start_at_turn(s, config))
+    errors.extend(_validate_window(s, config))
     return errors
 
 
@@ -410,7 +452,7 @@ def validate_backchannel(config: dict) -> list[dict]:
                 f"Invalid {s}.probability={v!r}. Must be in [0.0, 1.0].",
             ))
     errors.extend(_validate_offsets(s, config))
-    errors.extend(_validate_start_at_turn(s, config))
+    errors.extend(_validate_window(s, config))
     errors.extend(_validate_seed(s, config))
     return errors
 
@@ -427,7 +469,7 @@ def validate_barge_in(config: dict) -> list[dict]:
                 f"Invalid {s}.probability={v!r}. Must be in [0.0, 1.0].",
             ))
     errors.extend(_validate_offsets(s, config))
-    errors.extend(_validate_start_at_turn(s, config))
+    errors.extend(_validate_window(s, config))
     errors.extend(_validate_seed(s, config))
     return errors
 
@@ -436,7 +478,7 @@ def validate_dropout(config: dict) -> list[dict]:
     s = "dropout"
     return (
         _validate_probability(s, config)
-        + _validate_start_at_turn(s, config)
+        + _validate_window(s, config)
         + _validate_seed(s, config)
     )
 

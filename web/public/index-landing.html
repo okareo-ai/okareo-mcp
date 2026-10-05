@@ -359,7 +359,7 @@
           <div class="step">
             <div class="num">03</div>
             <h3>Just ask</h3>
-            <p>Ask your copilot <span class="inline-code">"List my Okareo scenarios."</span> If it answers, you're connected.</p>
+            <p>Ask your copilot <span class="inline-code">"List my Okareo projects."</span> If it answers, you're connected.</p>
           </div>
         </div>
       </div>
@@ -370,7 +370,7 @@
       <div class="wrap">
         <p class="eyebrow"><span class="dot"></span>Per-editor config</p>
         <h2>Where the config <span class="accent">goes.</span></h2>
-        <p class="section-lede">Same JSON, different file. Reload the client after editing.</p>
+        <p class="section-lede">Same JSON, different file, except VS Code, which uses a <span class="inline-code">servers</span> key. Reload the client after editing; in VS Code, start the server from <strong>MCP: List Servers</strong>.</p>
         <div class="clients">
           <div class="client-card">
             <h4>Claude Code</h4>
@@ -395,9 +395,17 @@
             <p style="margin:0;color:var(--text-2);font-size:15.5px;">Same JSON. Restart Cursor and reload the workspace.</p>
           </div>
           <div class="client-card">
-            <h4>VS Code (1.101+)</h4>
-            <p class="path">~/.config/Code/User/mcp.json · .vscode/mcp.json (workspace)</p>
-            <p style="margin:0;color:var(--text-2);font-size:15.5px;">Same JSON. Reload the window.</p>
+            <h4>GitHub Copilot in VS Code (1.101+)</h4>
+            <p class="path">.vscode/mcp.json (workspace) · MCP: Open User Configuration (global)</p>
+<pre><code>{
+  <span class="tok-key">"servers"</span>: {
+    <span class="tok-key">"okareo"</span>: {
+      <span class="tok-key">"type"</span>: <span class="tok-str">"http"</span>,
+      <span class="tok-key">"url"</span>: <span class="tok-str">"https://tools.okareo.com/mcp"</span>
+    }
+  }
+}</code></pre>
+            <p style="margin:14px 0 0;color:var(--text-2);font-size:15.5px;">Start it with <strong>MCP: List Servers</strong> → okareo → <strong>Start Server</strong>, then sign in.</p>
           </div>
         </div>
       </div>
@@ -480,11 +488,11 @@
           </details>
           <details>
             <summary>Which editors are supported?<span class="plus">+</span></summary>
-            <p>Any MCP client that supports streamable-HTTP: Claude Code, Claude Desktop, Cursor, and VS Code (1.101+) are documented above. Others that speak the protocol work the same way.</p>
+            <p>Any MCP client that supports streamable-HTTP: Claude Code, Claude Desktop, Cursor, and GitHub Copilot in VS Code (1.101+) are documented above. The GitHub Copilot CLI and Slackbot are at <a href="https://docs.okareo.com/mcp/configuration">docs.okareo.com/mcp/configuration</a>. Others that speak the protocol work the same way.</p>
           </details>
           <details>
             <summary>How do I verify it's connected?<span class="plus">+</span></summary>
-            <p>Ask your copilot <span class="inline-code">"List my Okareo scenarios."</span> A successful connection returns your existing scenarios. If you see an auth prompt instead, complete the browser sign-in.</p>
+            <p>Ask your copilot <span class="inline-code">"List my Okareo projects."</span> A successful connection returns your existing projects. If you see an auth prompt instead, complete the browser sign-in.</p>
           </details>
           <details>
             <summary>What if my client doesn't support OAuth?<span class="plus">+</span></summary>

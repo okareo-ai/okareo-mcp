@@ -35,6 +35,7 @@ from src.auth.context import (
     SessionCredential,
     get_session_credential_optional,
 )
+from src.auth.protected_resource import OkareoFastMCP
 
 
 @pytest.fixture
@@ -72,7 +73,7 @@ def wired_server_factory(rsa_keypair, jwks_doc, issuer_url, resource_server_url)
             required_scope="okareo:use",
         )
 
-        mcp = FastMCP(
+        mcp = OkareoFastMCP(
             "test-okareo-mcp",
             token_verifier=verifier,
             auth=AuthSettings(
@@ -183,12 +184,19 @@ def _call_with_session_manager(mcp, method: str, params: dict | None, headers: d
 
 
 class TestAuthBoundary:
-    def test_missing_token_returns_401_with_www_authenticate(self, wired_server):
+    def test_missing_token_returns_401_with_www_authenticate(
+        self, wired_server, resource_server_url
+    ):
         r = _post_jsonrpc(wired_server.streamable_http_app(), "tools/list", None, {})
         assert r.status_code == 401
         www_auth = r.headers.get("www-authenticate", "")
         assert "Bearer" in www_auth
-        assert "resource_metadata=" in www_auth
+        # 046 FR-005: the header names the protected resource document exactly;
+        # a strict client fetches this address verbatim.
+        assert (
+            f'resource_metadata="{resource_server_url}/.well-known/oauth-protected-resource"'
+            in www_auth
+        ), www_auth
 
     def test_prm_advertises_self_as_authorization_server(
         self, wired_server, resource_server_url
@@ -197,6 +205,9 @@ class TestAuthBoundary:
         `authorization_servers` field MUST point at the MCP server itself,
         not Frontegg. MCP clients discover us, do DCR with us, and run the
         OAuth flow through us — Frontegg is invisible at the protocol layer.
+
+        046: compared exactly. A trailing slash here is what the AS document's
+        `issuer` lacks, and RFC 8414 §3.3 clients refuse the mismatch.
         """
         transport = httpx.ASGITransport(app=wired_server.streamable_http_app())
 
@@ -211,10 +222,7 @@ class TestAuthBoundary:
         r = asyncio.run(_run())
         assert r.status_code == 200
         body = r.json()
-        # The resource_server_url may render with a trailing slash; strip
-        # both sides before comparison.
-        advertised = [s.rstrip("/") for s in body["authorization_servers"]]
-        assert resource_server_url.rstrip("/") in advertised, body
+        assert body["authorization_servers"] == [resource_server_url], body
 
     def test_malformed_token_returns_401(self, wired_server):
         r = _post_jsonrpc(

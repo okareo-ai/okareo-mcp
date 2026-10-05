@@ -26,8 +26,12 @@ TRIGGERS = {
         {"barge_in": {"prompt": "x", "utterance": "wait"}},
     "Set either noise.profile or noise.noise_profile, not both.":
         {"noise": {"profile": "a", "noise_profile": "b", "snr_db": 10}},
-    "Invalid dropout.start_at_turn=0. Must be an int >= 1 (turn 0 is the agent's greeting).":
+    "Invalid dropout.start_at_turn=0. Must be an int >= 1.":
         {"dropout": {"probability": 0.3, "start_at_turn": 0}},
+    "Invalid dropout.end_at_turn=0. Must be an int >= 1, or null for no end.":
+        {"dropout": {"probability": 0.3, "end_at_turn": 0}},
+    "Invalid dropout window: end_at_turn=2 is before start_at_turn=4, so dropout would never fire. Raise end_at_turn or lower start_at_turn.":
+        {"dropout": {"probability": 0.3, "start_at_turn": 4, "end_at_turn": 2}},
     "augmentation.dropout.start_at_turn=6 is beyond max_turns=5, so dropout would never fire. Lower start_at_turn or raise max_turns.":
         {"dropout": {"probability": 0.3, "start_at_turn": 6}},
     "Invalid dropout.seed='abc'. Must be an int or null.":

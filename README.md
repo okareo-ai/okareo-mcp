@@ -7,7 +7,7 @@ For detailed documentation, see the [Okareo MCP docs](https://docs.okareo.com/do
 ## Prerequisites
 
 - An Okareo account at [app.okareo.com](https://app.okareo.com)
-- A copilot that supports MCP servers (Claude Code, Cursor, or VS Code)
+- A copilot that supports MCP servers (Claude Code, Cursor, VS Code, or GitHub Copilot), or Slackbot in Slack
 - Python 3.10–3.12 (only for the local install modes; not needed for remote)
 
 ---
@@ -50,6 +50,8 @@ For clients that haven't shipped the MCP OAuth flow yet, paste your API key as a
   }
 }
 ```
+
+GitHub Copilot (in VS Code and the Copilot CLI), Slackbot and every other client are set up at [docs.okareo.com/mcp/configuration](https://docs.okareo.com/mcp/configuration).
 
 ### Working across multiple Okareo organizations
 
@@ -235,7 +237,7 @@ Then use `"command": "okareo-mcp"` instead of `"command": "uvx"` with `"args": [
 | Tool | Description |
 |------|-------------|
 | `list_tenants` | List every Okareo organization you have access to in this MCP session |
-| `switch_tenant` | Change which Okareo organization subsequent tool calls operate against |
+| `switch_tenant` | Doesn't change the active organization; returns how to reconnect and pick another one at sign-in |
 
 ### Documentation & Templates
 

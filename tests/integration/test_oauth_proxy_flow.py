@@ -16,11 +16,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import re
 import urllib.parse
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -29,6 +31,8 @@ from pydantic import AnyHttpUrl
 from src.auth.context import get_session_credential_optional
 from src.auth.oauth_proxy import ProxyConfig, register_oauth_proxy_routes
 from src.auth.oauth_state import OAuthStateStore
+from src.auth.protected_resource import OkareoFastMCP
+from tests.integration.oauth_discovery import authorization_server_metadata_url
 
 
 def _pkce_pair() -> tuple[str, str]:
@@ -77,7 +81,7 @@ def wired_proxy_server(jwks_doc, jwt_signer, default_claims, issuer_url):
         required_scope="okareo:use",
     )
 
-    mcp = FastMCP(
+    mcp = OkareoFastMCP(
         "test-okareo-mcp",
         token_verifier=verifier,
         auth=AuthSettings(
@@ -317,3 +321,118 @@ class TestASMetadataPublished:
         # Discovery doc must explicitly NOT point at Frontegg.
         assert "frontegg" not in body["authorization_endpoint"]
         assert "frontegg" not in body["token_endpoint"]
+
+
+class TestAuthorizationServerDiscovery:
+    """046: the two discovery documents name the authorization server identically.
+
+    A client that follows RFC 8414 §3.3 (the Copilot CLI does) takes
+    ``authorization_servers[0]`` from the protected resource document, builds
+    the authorization server document's URL from it, and refuses the document
+    unless ``issuer`` is identical, character for character.
+    """
+
+    def test_issuer_is_identical_to_the_advertised_authorization_server(
+        self, wired_proxy_server
+    ):
+        mcp, _state, _config, _fixture_jwt = wired_proxy_server
+        app = mcp.streamable_http_app()
+
+        prm = _get(app, "/.well-known/oauth-protected-resource")
+        assert prm.status_code == 200
+        advertised = prm.json()["authorization_servers"][0]
+
+        # Redirects are followed so that a trailing slash fails here on the
+        # issuer comparison, not on Starlette's 307 for the slashed path.
+        as_doc = _get(
+            app,
+            authorization_server_metadata_url(advertised),
+            follow_redirects=True,
+        )
+        assert as_doc.status_code == 200, as_doc.text
+        assert as_doc.json()["issuer"] == advertised
+
+    def test_discovery_chain_from_an_unauthenticated_request(self, wired_proxy_server):
+        """The whole chain the Copilot CLI walks before it can register:
+        401 → ``resource_metadata`` → protected resource document →
+        ``authorization_servers[0]`` → authorization server document, whose
+        ``issuer`` must be identical and which must offer registration."""
+        mcp, _state, _config, _fixture_jwt = wired_proxy_server
+        app = mcp.streamable_http_app()
+
+        unauthenticated = _post(
+            app,
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            headers={
+                "content-type": "application/json",
+                "accept": "application/json, text/event-stream",
+            },
+        )
+        assert unauthenticated.status_code == 401
+        challenge = unauthenticated.headers["www-authenticate"]
+        match = re.search(r'resource_metadata="([^"]+)"', challenge)
+        assert match, challenge
+        prm_url = match.group(1)
+
+        prm = _get(app, prm_url)
+        assert prm.status_code == 200, prm.text
+        advertised = prm.json()["authorization_servers"][0]
+
+        as_doc = _get(
+            app,
+            authorization_server_metadata_url(advertised),
+            follow_redirects=True,
+        )
+        assert as_doc.status_code == 200, as_doc.text
+        body = as_doc.json()
+        assert body["issuer"] == advertised
+        assert body["registration_endpoint"] == f"{advertised}/register"
+
+    def test_document_differs_from_the_sdk_default_only_in_authorization_servers(
+        self,
+    ):
+        """Everything else — resource, scopes, bearer methods, caching, CORS —
+        is what the installed SDK serves for the same settings.
+
+        If this fails because the stock document no longer carries the trailing
+        slash, the SDK has fixed its rendering: ``OkareoFastMCP`` and this
+        test can be deleted, with ``server.py`` back on plain ``FastMCP``.
+        """
+
+        class _RejectEveryToken(TokenVerifier):
+            async def verify_token(self, token: str):
+                return None
+
+        def _document(server_class):
+            server = server_class(
+                "prm-probe",
+                token_verifier=_RejectEveryToken(),
+                auth=AuthSettings(
+                    issuer_url=AnyHttpUrl("http://localhost:8080"),
+                    resource_server_url=AnyHttpUrl("http://localhost:8080"),
+                    required_scopes=["okareo:use"],
+                ),
+                stateless_http=True,
+                json_response=True,
+                host="127.0.0.1",
+                port=0,
+                transport_security=TransportSecuritySettings(
+                    enable_dns_rebinding_protection=False,
+                ),
+            )
+            return _get(
+                server.streamable_http_app(),
+                "/.well-known/oauth-protected-resource",
+                headers={"origin": "https://client.example"},
+            )
+
+        stock, ours = _document(FastMCP), _document(OkareoFastMCP)
+        assert stock.status_code == 200 and ours.status_code == 200
+        stock_body, ours_body = stock.json(), ours.json()
+        # The SDK's rendering is the bug; ours is the issuer identifier.
+        assert stock_body.pop("authorization_servers") == ["http://localhost:8080/"]
+        assert ours_body.pop("authorization_servers") == ["http://localhost:8080"]
+        assert ours_body == stock_body
+        for header in ("cache-control", "access-control-allow-origin"):
+            assert ours.headers[header] == stock.headers[header], header

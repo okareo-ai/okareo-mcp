@@ -2,14 +2,14 @@
 
 The Okareo MCP is available as a **hosted, multi-tenant endpoint at `https://tools.okareo.com`**. Connect your AI copilot to it without installing Python, `uv`, `uvx`, or any container. Browser sign-in handles auth on first connect; thereafter the copilot stores the OAuth token itself.
 
-This page is the source of truth that `docs.okareo.com` imports for the public docs.
+The public docs at [docs.okareo.com/mcp/configuration](https://docs.okareo.com/mcp/configuration) cover every client, including GitHub Copilot and Slackbot.
 
 ---
 
 ## Prerequisites
 
 - An Okareo account at [app.okareo.com](https://app.okareo.com).
-- A copilot that supports MCP servers. The remote endpoint has been tested with Claude Code, Claude Desktop, Cursor, and VS Code (1.101 or later).
+- A copilot that supports MCP servers, or Slackbot in Slack. The remote endpoint has been tested with Claude Code, Claude Desktop, Cursor, GitHub Copilot (in VS Code 1.101 or later, and in the Copilot CLI), and Slackbot.
 
 You do **not** need Python, `uv`, `uvx`, the `okareo-mcp` package, or Docker for the remote endpoint.
 
@@ -105,30 +105,32 @@ Restart Cursor and reload the workspace.
 }
 ```
 
-### VS Code (1.101 or later)
+### GitHub Copilot in VS Code (1.101 or later)
 
-File: `~/.config/Code/User/mcp.json` (Linux/macOS) or per-workspace `.vscode/mcp.json`.
+File: per-workspace `.vscode/mcp.json`, or your user `mcp.json` (run **MCP: Open User Configuration**). VS Code reads servers from a `servers` key, not `mcpServers`.
 
 **Recommended (OAuth):**
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "okareo": {
+      "type": "http",
       "url": "https://tools.okareo.com/mcp"
     }
   }
 }
 ```
 
-Reload the window. The first tool invocation kicks off the OAuth flow.
+Start the server from the Command Palette: **MCP: List Servers** → **okareo** → **Start Server**, then sign in to Okareo in your browser.
 
 **Fallback (Bearer):**
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "okareo": {
+      "type": "http",
       "url": "https://tools.okareo.com/mcp",
       "headers": {
         "Authorization": "Bearer ${env:OKAREO_API_KEY}"
@@ -138,11 +140,33 @@ Reload the window. The first tool invocation kicks off the OAuth flow.
 }
 ```
 
+### GitHub Copilot CLI
+
+**Recommended (OAuth):**
+
+```bash
+copilot mcp add --transport http okareo https://tools.okareo.com/mcp
+```
+
+Start `copilot`. The first time, it opens Okareo's sign-in in your browser.
+
+**Fallback (Bearer):**
+
+```bash
+copilot mcp add --transport http --header 'Authorization: Bearer ${OKAREO_API_KEY}' okareo https://tools.okareo.com/mcp
+```
+
+Set `OKAREO_API_KEY` in your shell first.
+
+### Slackbot
+
+A Slack admin adds Okareo with **Add to Slack** on the Integrations page in [app.okareo.com](https://app.okareo.com), then each person connects it in Slackbot and signs in. Steps are at [docs.okareo.com/mcp/configuration#slackbot](https://docs.okareo.com/mcp/configuration#slackbot).
+
 ---
 
 ## Tenants — working across multiple Okareo organizations
 
-If your Okareo account belongs to more than one organization (Frontegg tenant), the remote MCP exposes two conversational tools so you don't have to leave the copilot to pick the right org.
+If your Okareo account belongs to more than one organization (Frontegg tenant), the remote MCP exposes two tools: one shows which organizations you have and which is active, the other tells you how to change it, which is to reconnect and pick another organization at sign-in.
 
 ### `list_tenants`
 
@@ -159,33 +183,24 @@ Show every organization you have access to in this session. The response marks w
 }
 ```
 
-The `active_tenant_source` field tells you whether the active tenant comes from your default sign-in (`jwt_default`) or from a previous `switch_tenant` call in this session (`override`).
+`active_tenant_source` is always `jwt_default`: the active organization is the one the session's token was issued for.
 
 ### `switch_tenant(tenant_id)`
 
-Change the active organization for subsequent tool calls in the current MCP session:
+Doesn't change the active organization. It returns how to switch, which is to reconnect and pick another organization at sign-in:
 
 ```jsonc
 {
-  "active_tenant_id":   "fg-tenant-a1b2",
-  "active_tenant_name": "Acme Corp",
-  "previous_tenant_id": "fg-tenant-c3d4",
-  "resume_hint": "Session-scoped only — re-call switch_tenant('fg-tenant-a1b2') at the start of any resumed conversation."
+  "action": "reauthenticate_to_change_tenant",
+  "message": "Changing your active Okareo organization now happens during sign-in. ...",
+  "docs_url": "...",
+  "current_tenant_id": "fg-tenant-c3d4"
 }
 ```
 
-After this call, every tenant-scoped tool (`list_scenarios`, `run_test`, `run_simulation`, etc.) in this MCP session operates against `Acme Corp`.
-
-### Resume behavior (important)
-
-The selection is **session-scoped** — it lasts as long as the MCP transport stays connected. If you close and reopen your copilot, the new MCP session starts on whatever Frontegg has as your default tenant (typically your last-used).
-
-For continuity in a resumed chat, ask the LLM to re-issue `switch_tenant` from the conversation history. Well-aligned models that read MCP `instructions` will do this automatically; smaller models may need a nudge ("we were working on Acme — please switch back"). The `active_tenant_id` field on every `list_tenants` response makes it easy to verify which tenant you're actually on.
-
 ### Restrictions
 
-- **OAuth path only.** On the Bearer-API-key fallback, both tools return `tenant_selection_requires_oauth` — each API key is already pinned to a single organization.
-- **No persistence.** `switch_tenant` does NOT change your Frontegg default tenant. Your next sign-in starts on whatever Frontegg's default is.
+- **OAuth path only.** On the Bearer-API-key fallback, both tools return `tenant_selection_requires_oauth` — each API key is already pinned to a single organization. To work in another organization with an API key, use a key made in that organization.
 - **Read-only.** Tenant CRUD (creating tenants, inviting users, etc.) remains in the Okareo dashboard.
 
 ---
@@ -252,9 +267,8 @@ service (new revision, config-only), confirm responses carry the pinned tag and
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Copilot prompts for "OAuth client_id" | Copilot doesn't yet implement MCP OAuth discovery | Use the fallback Bearer-header config instead. |
+| GitHub Copilot CLI says the server "doesn't support automatic client registration" and asks for OAuth client credentials | Before October 2026 the hosted server named its authorization server with a trailing slash in one discovery document and without it in the other; the CLI compares the two exactly (RFC 8414 §3.3) | Fixed on the server. Add the server again with no headers. The Bearer-header fallback also still works. |
 | `save_scenario` rejects an attempt to pass a file path (the hosted tool doesn't list a `file_path` parameter) | The hosted server can't read your local files, so the parameter isn't offered; a client that sends one anyway falls through to the "provide a dataset source" error | For < 2,000 rows, have the copilot read the file and pass its contents as `content`; for ≥ 2,000 rows, upload the file directly to Okareo (web app / SDK / CLI). |
 | OAuth browser shows "redirect URI not allowed" | Stale browser session against an older config | Clear browser cookies for `tools.okareo.com` and retry. |
 | `list_tenants` returns `tenant_selection_requires_oauth` | The session authenticated via the API-key bearer path | API keys are single-org; either generate a new API key in the desired org, or switch to the OAuth path. |
-| Tools return data for the wrong organization after resume | LLM didn't re-issue `switch_tenant` on conversation resume | Call `list_tenants` to confirm `active_tenant_id`; then `switch_tenant` to the right org. |
-| Tool calls return 429 | Per-credential throttle (60 req/min/org by default) tripped | Wait for the `retry_after` window; if persistent, contact support — your traffic profile may warrant a higher limit. |
+| Tool calls return a `rate_limited` error | Per-organization throttle (240 tool calls a minute) tripped | Wait for the `retry_after_seconds` window; if persistent, contact support — your traffic profile may warrant a higher limit. |

@@ -43,6 +43,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 
 from src.auth.oauth_state import OAuthStateStore
+from src.auth.protected_resource import issuer_identifier
 
 
 _logger = logging.getLogger(__name__)
@@ -187,7 +188,9 @@ def _error_response(status: int, error: str, description: str) -> JSONResponse:
 
 def make_as_metadata_route(config: ProxyConfig):
     async def _route(request: Request) -> JSONResponse:  # noqa: ARG001
-        base = config.resource_server_url.rstrip("/")
+        # Same helper the protected-resource document uses for
+        # `authorization_servers`; the two must be identical (RFC 8414 §3.3).
+        base = issuer_identifier(config.resource_server_url)
         return JSONResponse(
             {
                 "issuer": base,

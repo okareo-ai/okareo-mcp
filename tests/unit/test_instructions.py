@@ -130,6 +130,7 @@ def test_instructions_tool_names_valid():
         "tenant_id",
         "active_tenant_id",
         "active_tenant_source",
+        "is_current",
         "tenant_selection_requires_oauth",
         # Parameter names referenced in instructions (not tool names)
         "all_versions",

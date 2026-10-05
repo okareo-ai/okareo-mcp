@@ -539,6 +539,51 @@ class TestDropoutAndStartAtTurn:
         mut_instance.run_test.assert_called_once()
 
 
+class TestEndAtTurn:
+    """045: the window is validated, then forwarded exactly as written."""
+
+    @patch("okareo.model_under_test.ModelUnderTest")
+    @patch("src.tools.simulations.resolve_project")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_window_reaches_run_test_unchanged(
+        self, mock_client, mock_project, mock_mut_class, tools,
+        mock_get_scenario_sets, sim_submission,
+    ):
+        block = {
+            "dropout": {"probability": 1.0, "start_at_turn": 3, "end_at_turn": 3},
+            "noise": {"profile": "cafeteria", "snr_db": 10},
+        }
+        result, _, mut_instance = _run_augmented(
+            tools, mock_client, mock_project, mock_mut_class,
+            mock_get_scenario_sets, block, max_turns=5,
+        )
+        assert "error" not in result, result
+        emitted = mut_instance.run_test.call_args.kwargs["simulation_params"].to_dict()
+        assert emitted["augmentation"] == block
+
+    @patch("okareo.model_under_test.ModelUnderTest")
+    @patch("src.tools.simulations.resolve_project")
+    @patch("src.tools.simulations.get_okareo_client")
+    def test_inverted_window_rejected_before_sdk(
+        self, mock_client, mock_project, mock_mut_class, tools,
+        mock_get_scenario_sets,
+    ):
+        result, okareo, mut_instance = _run_augmented(
+            tools, mock_client, mock_project, mock_mut_class,
+            mock_get_scenario_sets,
+            {"dropout": {"probability": 1.0, "start_at_turn": 4, "end_at_turn": 2}},
+            max_turns=5,
+        )
+        assert result["error"] == (
+            "Invalid dropout window: end_at_turn=2 is before start_at_turn=4, "
+            "so dropout would never fire. Raise end_at_turn or lower "
+            "start_at_turn."
+        )
+        assert result["field"] == "augmentation.dropout.end_at_turn"
+        okareo.get_target_by_name.assert_not_called()
+        mut_instance.run_test.assert_not_called()
+
+
 class TestPayloadUnchanged:
     """044 FR-012: the block is validated, never rewritten. A block that was
     valid before 044 must reach the Okareo server exactly as written."""
