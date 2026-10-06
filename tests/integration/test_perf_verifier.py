@@ -19,6 +19,7 @@ import time
 
 import pytest
 
+from src.auth.api_key_verifier import KeyValidation
 from src.auth.context import _reset_for_tests as _reset_credential
 
 
@@ -44,14 +45,14 @@ def test_verifier_p95_under_50ms(
     jwks = JWKSCache(issuer_url)
     jwks.get_key = _stub_get_key  # type: ignore[method-assign]
 
-    async def _resolver(_):  # noqa: ANN001
-        return None
+    async def _api_key_validator(_):  # noqa: ANN001
+        return KeyValidation(outcome="invalid")
 
     verifier = CombinedTokenVerifier(
         issuer_url=issuer_url,
         resource_server_url=resource_server_url,
         jwks_cache=jwks,
-        api_key_resolver=_resolver,
+        api_key_validator=_api_key_validator,
         required_scope="okareo:use",
     )
     token = jwt_signer(default_claims)

@@ -476,14 +476,12 @@ def _audience_aliases() -> list[str]:
     return aliases
 
 
-def _build_real_verifier(jwks_cache) -> TokenVerifier:
+def _build_real_verifier(jwks_cache, api_key_verifier, shared_keys) -> TokenVerifier:
     """Construct the production ``CombinedTokenVerifier`` from env config."""
-    from src.auth.api_key_verifier import OkareoAPIKeyVerifier
     from src.auth.verifier import CombinedTokenVerifier
 
     issuer = _frontegg_issuer()
     resource = os.environ.get("MCP_RESOURCE_SERVER_URL", "")
-    okareo_base = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
 
     additional_audiences: list[str] = []
     vendor_id = os.environ.get("FRONTEGG_VENDOR_ID", "").strip()
@@ -497,16 +495,50 @@ def _build_real_verifier(jwks_cache) -> TokenVerifier:
     required_scopes_list = _required_scopes_from_env()
     required_scope = required_scopes_list[0] if required_scopes_list else ""
 
-    api_key_verifier = OkareoAPIKeyVerifier(base_url=okareo_base)
-
     return CombinedTokenVerifier(
         issuer_url=issuer,
         resource_server_url=resource,
         jwks_cache=jwks_cache,
-        api_key_resolver=api_key_verifier.verify,
+        api_key_validator=api_key_verifier.validate,
         additional_audiences=additional_audiences,
         required_scope=required_scope,
+        shared_keys=shared_keys,
     )
+
+
+def _dcr_signing_key_from_env() -> tuple[str, bool]:
+    """``(key, configured)``. Unset → an ephemeral per-instance key.
+
+    Stateless DCR signing key (FR-021/FR-022). The ephemeral fallback is handy
+    in dev, but every restart and every cross-instance hop invalidates
+    existing client_ids. Production deploys MUST set this to a stable,
+    ≥256-bit value from the environment (or a secret manager).
+    """
+    key = os.environ.get("MCP_DCR_SIGNING_KEY", "").strip()
+    if not key:
+        import secrets as _secrets
+
+        _logger.warning(
+            "MCP_DCR_SIGNING_KEY is not set. Using an ephemeral "
+            "per-instance signing key — all DCR-issued client_ids will be "
+            "invalidated on this container's next restart, and cross-instance "
+            "OAuth flows will fail. Set MCP_DCR_SIGNING_KEY=<32+ random bytes> "
+            "for production."
+        )
+        return _secrets.token_urlsafe(43), False
+    if len(key.encode("utf-8")) < 32:
+        # FR-022 mandates ≥32 bytes (≥256 bits) of entropy. Shorter keys are
+        # honored (don't break the server) but produce a loud warning so
+        # operators know they're outside the documented threshold.
+        _logger.warning(
+            "MCP_DCR_SIGNING_KEY is shorter than the recommended 32 bytes "
+            "(%d bytes supplied). FR-022 recommends ≥256 bits of entropy; "
+            "the current value is below that threshold and weakens "
+            "HMAC-forgery resistance. Replace with a longer value before "
+            "production.",
+            len(key.encode("utf-8")),
+        )
+    return key, True
 
 
 if _HTTP_MODE:
@@ -518,11 +550,33 @@ if _HTTP_MODE:
 
     _jwks_cache = _JWKSCache(_frontegg_issuer())
 
+    from src.auth.api_key_verifier import OkareoAPIKeyVerifier as _OkareoAPIKeyVerifier
+    from src.auth.shared_connection import SharedConnectionKeys as _SharedConnectionKeys
+
+    _dcr_signing_key, _dcr_signing_key_configured = _dcr_signing_key_from_env()
+    # One instance, so the bearer path and the shared-connection token
+    # endpoint share one validation cache.
+    _api_key_verifier = _OkareoAPIKeyVerifier(
+        base_url=os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
+    )
+    # Shared-connection tokens must open on any instance, so they are only
+    # issued when the signing key is the stable, configured one (048 R8).
+    if _dcr_signing_key_configured:
+        _shared_keys = _SharedConnectionKeys.from_signing_key(_dcr_signing_key)
+    else:
+        _shared_keys = None
+        _logger.warning(
+            "Shared connections (/oauth/shared/*) are disabled: they need a "
+            "stable MCP_DCR_SIGNING_KEY."
+        )
+
     # AuthSettings + the real verifier wire in the spec-mandated auth
     # boundary: SDK auto-mounts /.well-known/oauth-protected-resource,
     # emits WWW-Authenticate on every 401, and validates Bearer credentials
     # via CombinedTokenVerifier (JWT or API-key fallback).
-    _fastmcp_kwargs["token_verifier"] = _build_real_verifier(_jwks_cache)
+    _fastmcp_kwargs["token_verifier"] = _build_real_verifier(
+        _jwks_cache, _api_key_verifier, _shared_keys
+    )
     _fastmcp_kwargs["auth"] = _build_auth_settings()
     _fastmcp_kwargs["stateless_http"] = True
     _fastmcp_kwargs["json_response"] = True
@@ -548,35 +602,6 @@ if _HTTP_MODE:
     )
     from src.auth.oauth_state import OAuthStateStore
 
-    # Stateless DCR signing key (FR-021/FR-022). If unset, generate an
-    # ephemeral per-instance key — handy in dev, but every restart and every
-    # cross-instance hop invalidates existing client_ids. Production deploys
-    # MUST set this to a stable, ≥256-bit value from the environment (or a
-    # secret manager).
-    _dcr_signing_key = os.environ.get("MCP_DCR_SIGNING_KEY", "").strip()
-    if not _dcr_signing_key:
-        import secrets as _secrets
-
-        _dcr_signing_key = _secrets.token_urlsafe(43)
-        _logger.warning(
-            "MCP_DCR_SIGNING_KEY is not set. Using an ephemeral "
-            "per-instance signing key — all DCR-issued client_ids will be "
-            "invalidated on this container's next restart, and cross-instance "
-            "OAuth flows will fail. Set MCP_DCR_SIGNING_KEY=<32+ random bytes> "
-            "for production."
-        )
-    elif len(_dcr_signing_key.encode("utf-8")) < 32:
-        # FR-022 mandates ≥32 bytes (≥256 bits) of entropy. Shorter keys are
-        # honored (don't break the server) but produce a loud warning so
-        # operators know they're outside the documented threshold.
-        _logger.warning(
-            "MCP_DCR_SIGNING_KEY is shorter than the recommended 32 bytes "
-            "(%d bytes supplied). FR-022 recommends ≥256 bits of entropy; "
-            "the current value is below that threshold and weakens "
-            "HMAC-forgery resistance. Replace with a longer value before "
-            "production.",
-            len(_dcr_signing_key.encode("utf-8")),
-        )
     _oauth_state = OAuthStateStore(dcr_signing_key=_dcr_signing_key)
     _proxy_config = ProxyConfig(
         resource_server_url=os.environ.get("MCP_RESOURCE_SERVER_URL", "").rstrip("/")
@@ -588,6 +613,17 @@ if _HTTP_MODE:
     # Mount the four OAuth Proxy routes (AS metadata + /oauth/authorize +
     # /oauth/callback + /oauth/token).
     register_oauth_proxy_routes(mcp, _oauth_state, _proxy_config)
+
+    # OAuth for clients a customer configures by hand, whose client secret
+    # is an Okareo API key (048). Not advertised in discovery.
+    from src.auth.shared_connection import register_shared_connection_routes
+
+    register_shared_connection_routes(
+        mcp,
+        keys=_shared_keys,
+        validator=_api_key_verifier.validate,
+        base_url=_proxy_config.resource_server_url,
+    )
 
     # Mount /register (DCR) sharing the same state.
     _dcr_app = build_dcr_app(_oauth_state)
@@ -755,7 +791,20 @@ if _HTTP_MODE:
 
         return JSONResponse({"status": "ok"})
 
+    # Egress readiness probe (047). /health answers as soon as the process is
+    # up; this one answers 200 only once this instance can reach the identity
+    # provider the OAuth proxy sends token calls to, so a startup probe or
+    # uptime check pointed here sees a blocked or unready outbound path.
+    from src.auth.egress_probe import make_egress_health_route
+
+    _egress_health_handler = make_egress_health_route(_proxy_config.frontegg_domain)
+
+    @mcp.custom_route("/health/egress", methods=["GET", "HEAD"])
+    async def _health_egress(request: _StarletteRequest):
+        return await _egress_health_handler(request)
+
     # Silence uvicorn's access log for /health to keep docker logs scannable.
+    # This also hides /health/egress; its failures log their own WARNING line.
     # We do NOT silence /.well-known/oauth-protected-resource because that's
     # a real client-traffic endpoint and we want to see it in logs.
     class _SuppressHealthAccessLogs(logging.Filter):
@@ -847,6 +896,19 @@ def _current_org_id() -> str | None:
         return None
 
 
+def _current_auth_kind() -> str | None:
+    """How the calling session authenticated (HTTP mode only)."""
+    if not _HTTP_MODE:
+        return None
+    try:
+        from src.auth.context import get_session_credential_optional
+
+        cred = get_session_credential_optional()
+        return cred.kind if cred else None
+    except Exception:  # pragma: no cover — defensive
+        return None
+
+
 # Per-credential throttle (FR-013 / SC-007). Instantiated once per server
 # process; one TokenBucket per org_id, lazily created. Disabled in stdio
 # mode (single-tenant has no use for per-credential throttling).
@@ -928,8 +990,11 @@ async def _instrumented_call_tool(name, arguments):
             return _error_content(format_tool_error(e, _key_registry))
 
     org_id = _current_org_id()
+    auth_kind = _current_auth_kind()
     started_at = time.monotonic()
-    _tool_log(f"[tool] CALL  name={name} org={org_id or '-'}")
+    _tool_log(
+        f"[tool] CALL  name={name} org={org_id or '-'} auth={auth_kind or '-'}"
+    )
 
     success = True
     error_summary = ""
@@ -947,7 +1012,7 @@ async def _instrumented_call_tool(name, arguments):
             outcome = "OK" if success else f"FAIL({error_summary})"
             _tool_log(
                 f"[tool] DONE  name={name} org={org_id or '-'} "
-                f"outcome={outcome} duration_ms={duration_ms}"
+                f"auth={auth_kind or '-'} outcome={outcome} duration_ms={duration_ms}"
             )
             # Analytics: fire-and-forget, never blocks tool execution
             try:

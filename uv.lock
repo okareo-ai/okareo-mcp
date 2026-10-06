@@ -664,9 +664,10 @@ wheels = [
 
 [[package]]
 name = "okareo-mcp"
-version = "0.0.53"
+version = "0.0.55"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "httpx" },
     { name = "langcodes", extra = ["data"] },
     { name = "mcp", extra = ["cli"] },
@@ -689,6 +690,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42" },
     { name = "httpx" },
     { name = "langcodes", extras = ["data"], specifier = ">=3.3" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.27" },

@@ -20,6 +20,7 @@ from starlette.routing import Route
 from src.auth.oauth_proxy import ProxyConfig, register_oauth_proxy_routes
 from src.auth.oauth_state import OAuthStateStore
 from src.auth.protected_resource import OkareoFastMCP, issuer_identifier
+from src.auth.verifier import CredentialUnavailableError, InvalidAPIKeyError
 
 PRM_PATH = "/.well-known/oauth-protected-resource"
 AS_PATH = "/.well-known/oauth-authorization-server"
@@ -130,9 +131,11 @@ class TestOkareoFastMCP:
             app = server.streamable_http_app()
 
         assert _prm_routes(app) == []
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and PRM_PATH in r.getMessage()
+        ]
         assert len(warnings) == 1, caplog.text
-        assert PRM_PATH in warnings[0].getMessage()
 
     def test_arguments_reach_the_sdk_unchanged(self, monkeypatch):
         seen: list[tuple] = []
@@ -145,6 +148,102 @@ class TestOkareoFastMCP:
         _server().streamable_http_app("positional", keyword=True)
 
         assert seen == [(("positional",), {"keyword": True})]
+
+
+class _Raise(TokenVerifier):
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def verify_token(self, token: str):
+        raise self._exc
+
+
+def _post_mcp(app, bearer: str | None = "some-token") -> httpx.Response:
+    headers = {"content-type": "application/json", "accept": "application/json, text/event-stream"}
+    if bearer is not None:
+        headers["authorization"] = f"Bearer {bearer}"
+
+    async def _run():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            return await client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                headers=headers,
+            )
+
+    return asyncio.run(_run())
+
+
+def _server_raising(exc: Exception) -> OkareoFastMCP:
+    return _server(
+        token_verifier=_Raise(exc),
+        auth=AuthSettings(
+            issuer_url=AnyHttpUrl("http://localhost:8080"),
+            resource_server_url=AnyHttpUrl("http://localhost:8080"),
+        ),
+    )
+
+
+class TestAuthErrorResponses:
+    """048 research R6: key-shaped bearers get a 401 that says what to fix,
+    and an okareo-server outage gets a 503, not "invalid key"."""
+
+    PRM_URL = "http://localhost:8080/.well-known/oauth-protected-resource"
+
+    def test_invalid_key_is_401_with_message_and_resource_metadata(self):
+        r = _post_mcp(_server_raising(InvalidAPIKeyError()).streamable_http_app())
+        assert r.status_code == 401
+        assert r.json() == {
+            "error": "invalid_token",
+            "error_description": InvalidAPIKeyError().description,
+        }
+        www = r.headers["www-authenticate"]
+        assert www.startswith('Bearer error="invalid_token"'), www
+        assert f'resource_metadata="{self.PRM_URL}"' in www, www
+
+    def test_resource_metadata_matches_the_sdks_own_401(self):
+        ours = _post_mcp(_server_raising(InvalidAPIKeyError()).streamable_http_app())
+        sdk = _post_mcp(_server_with_auth("http://localhost:8080").streamable_http_app())
+        assert sdk.status_code == 401
+        assert f'resource_metadata="{self.PRM_URL}"' in sdk.headers["www-authenticate"]
+        assert f'resource_metadata="{self.PRM_URL}"' in ours.headers["www-authenticate"]
+
+    def test_unavailable_is_503_with_retry_after(self):
+        r = _post_mcp(_server_raising(CredentialUnavailableError()).streamable_http_app())
+        assert r.status_code == 503
+        assert r.json() == {
+            "error": "temporarily_unavailable",
+            "error_description": CredentialUnavailableError().description,
+        }
+        assert r.headers["retry-after"] == "5"
+
+    def test_rejected_sign_in_token_keeps_the_sdks_401(self):
+        """FR-015: a verifier returning None still gets the SDK's response."""
+        r = _post_mcp(_server_with_auth("http://localhost:8080").streamable_http_app())
+        assert r.status_code == 401
+        assert r.json() == {
+            "error": "invalid_token",
+            "error_description": "Authentication required",
+        }
+
+    def test_warns_when_the_sdk_built_no_authentication_middleware(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(
+            FastMCP, "streamable_http_app", lambda self, *args, **kwargs: Starlette()
+        )
+        server = _server_with_auth("http://localhost:8080")
+
+        with caplog.at_level(logging.WARNING, logger="src.auth.protected_resource"):
+            server.streamable_http_app()
+
+        assert any(
+            "AuthenticationMiddleware" in r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+        ), caplog.text
 
 
 class TestBothDocumentsAgree:

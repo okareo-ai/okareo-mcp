@@ -77,7 +77,7 @@ def register_tools(mcp: FastMCP) -> None:
         ``tenant_selection_requires_oauth``.
         """
         credential = get_session_credential_optional()
-        if credential is None or credential.kind == "api_key":
+        if credential is None or credential.kind != "oauth":
             return _error(
                 "tenant_selection_requires_oauth",
                 "Tenant selection requires OAuth sign-in; the API-key bearer "
@@ -146,7 +146,7 @@ def register_tools(mcp: FastMCP) -> None:
         tied to one organization.
         """
         credential = get_session_credential_optional()
-        if credential is None or credential.kind == "api_key":
+        if credential is None or credential.kind != "oauth":
             return _error(
                 "tenant_selection_requires_oauth",
                 "Tenant selection requires OAuth sign-in; the API-key bearer "

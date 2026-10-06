@@ -60,6 +60,7 @@ _RESERVED_PROPERTIES = frozenset({
     "tool_call_success",
     "org_id",
     "org_name",
+    "auth_type",
     "$groups",
     "$process_person_profile",
 })
@@ -292,6 +293,10 @@ def emit_tool_event(
         # cheap and profile-less.
         "$process_person_profile": bool(email),
     }
+    if cred is not None:
+        # oauth / api_key / shared_api_key: a shared connection's activity is
+        # otherwise indistinguishable from a developer's own key (048 FR-017).
+        properties["auth_type"] = cred.kind
     if org_id:
         properties["org_id"] = org_id
         properties["$groups"] = {"organization": org_id}

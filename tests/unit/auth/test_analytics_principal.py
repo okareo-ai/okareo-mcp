@@ -369,3 +369,53 @@ class TestStdioModePrincipalUnchanged:
 
         asyncio.run(run())
         assert captured[0]["distinct_id"] == "process-uuid-xyz"
+
+
+class TestAuthType:
+    """048 FR-017: every hosted event says how the session authenticated."""
+
+    @pytest.mark.parametrize("kind", ["oauth", "api_key", "shared_api_key"])
+    def test_auth_type_is_the_credential_kind(self, kind):
+        client, _ = _client("streamable-http")
+        captured, fake_send = _capture_payload()
+
+        async def run():
+            set_session_credential(
+                SessionCredential(kind=kind, api_key="k", org_id="org-ACME")
+            )
+            with patch("src.analytics._send_event", fake_send):
+                emit_tool_event(client, tool_name="t", success=True)
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        assert captured[0]["properties"]["auth_type"] == kind
+
+    def test_absent_in_stdio(self):
+        client, _ = _client("stdio")
+        captured, fake_send = _capture_payload()
+
+        async def run():
+            with patch("src.analytics._send_event", fake_send):
+                emit_tool_event(client, tool_name="t", success=True)
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        assert "auth_type" not in captured[0]["properties"]
+
+    def test_annotation_cannot_overwrite_it(self):
+        client, _ = _client("streamable-http")
+        captured, fake_send = _capture_payload()
+
+        async def run():
+            set_session_credential(
+                SessionCredential(kind="shared_api_key", api_key="k", org_id="org-ACME")
+            )
+            with patch("src.analytics._send_event", fake_send):
+                emit_tool_event(
+                    client, tool_name="t", success=True,
+                    annotations={"auth_type": "oauth"},
+                )
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        assert captured[0]["properties"]["auth_type"] == "shared_api_key"

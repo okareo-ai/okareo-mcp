@@ -6,6 +6,9 @@ over the ASGI transport. They cover:
 
 - OAuth happy path: a fixture-signed JWT is accepted; tools/list returns.
 - Bearer fallback happy path: a fixture API key is accepted; tools/list returns.
+  The key is validated by the real ``OkareoAPIKeyVerifier`` against a mocked
+  okareo-server (048), so its outcomes (accepted, rejected, unreachable) are
+  driven end to end.
 - 401 paths: missing / malformed / expired / wrong-aud tokens are rejected
   with the right ``WWW-Authenticate`` header.
 - FR-014 sanity: provider keys remain server-startup env, not per-request.
@@ -31,20 +34,50 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 
-from src.auth.context import (
-    SessionCredential,
-    get_session_credential_optional,
-)
+import jwt as pyjwt
+
+from src.auth.context import get_session_credential_optional
 from src.auth.protected_resource import OkareoFastMCP
+
+# A key as okareo-server mints it (048 R1): a JWT with `type: apiKey`. Its
+# signature is never checked by the MCP, so any signing key will do.
+VALID_KEY = pyjwt.encode(
+    {"type": "apiKey", "tenantId": "org-via-api-key", "sub": "key-creator"},
+    "fixture-signing-key-that-is-32-bytes!",
+    algorithm="HS256",
+)
+
+
+class _OkareoServer:
+    """Mock okareo-server ``GET /v0/projects``; tests set ``respond``."""
+
+    def __init__(self) -> None:
+        self.respond = lambda _r: httpx.Response(200, json=[{"id": "p1"}])
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.headers.get("api-key") != VALID_KEY:
+            return httpx.Response(401)
+        result = self.respond(request)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 @pytest.fixture
-def wired_server_factory(rsa_keypair, jwks_doc, issuer_url, resource_server_url):
+def okareo_server() -> _OkareoServer:
+    return _OkareoServer()
+
+
+@pytest.fixture
+def wired_server_factory(
+    rsa_keypair, jwks_doc, issuer_url, resource_server_url, okareo_server
+):
     """Returns a factory that builds a fresh wired FastMCP per call.
 
     The session manager can only run once per instance, so happy-path tests
     that need ``session_manager.run()`` must construct fresh servers.
     """
+    from src.auth.api_key_verifier import OkareoAPIKeyVerifier
     from src.auth.jwks_cache import JWKSCache
     from src.auth.verifier import CombinedTokenVerifier
 
@@ -54,22 +87,19 @@ def wired_server_factory(rsa_keypair, jwks_doc, issuer_url, resource_server_url)
                 return k
         return None
 
-    async def _api_key_resolver(api_key: str):
-        if api_key == "okareo-VALID-FIXTURE-KEY":
-            return SessionCredential(
-                kind="api_key", api_key=api_key, org_id="org-via-api-key"
-            )
-        return None
-
     def _factory() -> FastMCP:
         jwks = JWKSCache(issuer_url)
         jwks.get_key = _stub_get_key  # type: ignore[method-assign]
 
+        key_verifier = OkareoAPIKeyVerifier(
+            base_url="https://api.okareo.example/",
+            transport=httpx.MockTransport(okareo_server.handler),
+        )
         verifier = CombinedTokenVerifier(
             issuer_url=issuer_url,
             resource_server_url=resource_server_url,
             jwks_cache=jwks,
-            api_key_resolver=_api_key_resolver,
+            api_key_validator=key_verifier.validate,
             required_scope="okareo:use",
         )
 
@@ -283,7 +313,7 @@ class TestHappyPaths:
             wired_server_factory(),
             "tools/list",
             None,
-            {"authorization": "Bearer okareo-VALID-FIXTURE-KEY"},
+            {"authorization": f"Bearer {VALID_KEY}"},
         )
         assert r.status_code == 200
         body = _parse_jsonrpc_body(r)
@@ -303,13 +333,67 @@ class TestHappyPaths:
             wired_server_factory(),
             "tools/list",
             None,
-            {"authorization": "Bearer okareo-VALID-FIXTURE-KEY"},
+            {"authorization": f"Bearer {VALID_KEY}"},
         )
         oauth_tools = {t["name"] for t in _parse_jsonrpc_body(oauth)["result"]["tools"]}
         bearer_tools = {
             t["name"] for t in _parse_jsonrpc_body(bearer)["result"]["tools"]
         }
         assert oauth_tools == bearer_tools
+
+
+class TestServerMintedKeys:
+    """048 US1: a key minted by okareo-server authenticates end to end, and
+    okareo-server's answer decides the response."""
+
+    def test_whoami_acts_in_the_keys_organization(self, wired_server_factory):
+        r = _call_with_session_manager(
+            wired_server_factory(),
+            "tools/call",
+            {"name": "whoami", "arguments": {}},
+            {"authorization": f"Bearer {VALID_KEY}"},
+        )
+        assert r.status_code == 200
+        body = _parse_jsonrpc_body(r)
+        assert '"org_id":"org-via-api-key"' in body["result"]["content"][0]["text"].replace(" ", "")
+
+    def test_organization_without_projects_can_connect(
+        self, wired_server_factory, okareo_server
+    ):
+        okareo_server.respond = lambda _r: httpx.Response(200, json=[])
+        r = _call_with_session_manager(
+            wired_server_factory(), "tools/list", None,
+            {"authorization": f"Bearer {VALID_KEY}"},
+        )
+        assert r.status_code == 200
+
+    def test_revoked_key_gets_401_naming_the_key(self, wired_server, okareo_server):
+        okareo_server.respond = lambda _r: httpx.Response(401)
+        r = _post_jsonrpc(
+            wired_server.streamable_http_app(), "tools/list", None,
+            {"authorization": f"Bearer {VALID_KEY}"},
+        )
+        assert r.status_code == 401
+        assert "API key is not valid" in r.json()["error_description"]
+        assert "resource_metadata=" in r.headers["www-authenticate"]
+
+    def test_okareo_unreachable_gets_503(self, wired_server, okareo_server):
+        okareo_server.respond = lambda _r: httpx.ConnectError("down")
+        r = _post_jsonrpc(
+            wired_server.streamable_http_app(), "tools/list", None,
+            {"authorization": f"Bearer {VALID_KEY}"},
+        )
+        assert r.status_code == 503
+        assert r.json()["error"] == "temporarily_unavailable"
+        assert r.headers["retry-after"] == "5"
+
+    def test_opaque_bearer_gets_401_naming_the_key(self, wired_server):
+        r = _post_jsonrpc(
+            wired_server.streamable_http_app(), "tools/list", None,
+            {"authorization": "Bearer okareo-OPAQUE-KEY"},
+        )
+        assert r.status_code == 401
+        assert "API key is not valid" in r.json()["error_description"]
 
 
 class TestEnvironmentInvariants:

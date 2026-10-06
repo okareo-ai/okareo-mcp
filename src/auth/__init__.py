@@ -17,11 +17,17 @@ from src.auth.context import (
 )
 from src.auth.dcr_proxy import build_dcr_app
 from src.auth.jwks_cache import JWKSCache
-from src.auth.verifier import CombinedTokenVerifier
+from src.auth.verifier import (
+    CombinedTokenVerifier,
+    CredentialUnavailableError,
+    InvalidAPIKeyError,
+)
 
 __all__ = [
     "CombinedTokenVerifier",
+    "CredentialUnavailableError",
     "CredentialMissingError",
+    "InvalidAPIKeyError",
     "JWKSCache",
     "OkareoAPIKeyVerifier",
     "SessionCredential",

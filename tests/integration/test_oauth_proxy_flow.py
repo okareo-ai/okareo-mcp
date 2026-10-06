@@ -28,6 +28,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 
+from src.auth.api_key_verifier import KeyValidation
 from src.auth.context import get_session_credential_optional
 from src.auth.oauth_proxy import ProxyConfig, register_oauth_proxy_routes
 from src.auth.oauth_state import OAuthStateStore
@@ -70,14 +71,14 @@ def wired_proxy_server(jwks_doc, jwt_signer, default_claims, issuer_url):
     jwks = JWKSCache(issuer_url)
     jwks.get_key = _stub_get_key  # type: ignore[method-assign]
 
-    async def _api_key_resolver(_: str):
-        return None  # bearer-fallback disabled for this test
+    async def _api_key_validator(_: str):
+        return KeyValidation(outcome="invalid")  # bearer-fallback disabled for this test
 
     verifier = CombinedTokenVerifier(
         issuer_url=issuer_url,
         resource_server_url=resource_server_url,
         jwks_cache=jwks,
-        api_key_resolver=_api_key_resolver,
+        api_key_validator=_api_key_validator,
         required_scope="okareo:use",
     )
 
@@ -321,6 +322,25 @@ class TestASMetadataPublished:
         # Discovery doc must explicitly NOT point at Frontegg.
         assert "frontegg" not in body["authorization_endpoint"]
         assert "frontegg" not in body["token_endpoint"]
+
+    def test_document_is_unchanged_by_shared_connections(self, wired_proxy_server):
+        """048 FR-015: the shared-connection routes are not advertised, and
+        the document DCR clients read is exactly what it was before 048."""
+        mcp, _state, config, _fixture_jwt = wired_proxy_server
+        base = config.resource_server_url.rstrip("/")
+        r = _get(mcp.streamable_http_app(), "/.well-known/oauth-authorization-server")
+        assert r.json() == {
+            "issuer": base,
+            "authorization_endpoint": f"{base}/oauth/authorize",
+            "token_endpoint": f"{base}/oauth/token",
+            "registration_endpoint": f"{base}/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256"],
+            "scopes_supported": ["okareo:use"],
+            "token_endpoint_auth_methods_supported": ["none"],
+        }
+        assert "/oauth/shared" not in r.text
 
 
 class TestAuthorizationServerDiscovery:

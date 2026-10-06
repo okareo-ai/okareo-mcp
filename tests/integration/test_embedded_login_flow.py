@@ -34,6 +34,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 
+from src.auth.api_key_verifier import KeyValidation
 from src.auth.oauth_proxy import ProxyConfig, register_oauth_proxy_routes
 from src.auth.oauth_state import OAuthStateStore
 
@@ -87,8 +88,8 @@ def wired_embedded_server(jwks_doc):
     jwks = JWKSCache(issuer)
     jwks.get_key = _stub_get_key  # type: ignore[method-assign]
 
-    async def _api_key_resolver(_: str):
-        return None
+    async def _api_key_validator(_: str):
+        return KeyValidation(outcome="invalid")
 
     from src.auth.verifier import CombinedTokenVerifier
 
@@ -96,7 +97,7 @@ def wired_embedded_server(jwks_doc):
         issuer_url=issuer,
         resource_server_url=resource_server_url,
         jwks_cache=jwks,
-        api_key_resolver=_api_key_resolver,
+        api_key_validator=_api_key_validator,
         required_scope="okareo:use",
     )
 

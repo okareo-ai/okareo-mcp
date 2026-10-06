@@ -2,7 +2,8 @@
 
 A `SessionCredential` is the unified shape that every tool, the analytics
 layer, and the throttle middleware consume — regardless of whether the caller
-authenticated via OAuth (Frontegg JWT) or via the bearer-API-key fallback.
+authenticated via OAuth (Frontegg JWT), the bearer-API-key fallback, or a
+shared connection backed by an API key.
 
 The credential is set once per request, inside `CombinedTokenVerifier`, and
 read back by tools via `get_session_credential()`. Lifetime is bounded by the
@@ -17,7 +18,9 @@ from datetime import datetime
 from typing import Literal
 
 
-CredentialKind = Literal["oauth", "api_key"]
+# `api_key`: a raw Okareo API key sent as the bearer. `shared_api_key`: the
+# same key reached through an `okmcp_at_` shared-connection token (048).
+CredentialKind = Literal["oauth", "api_key", "shared_api_key"]
 
 
 class CredentialMissingError(RuntimeError):
@@ -37,8 +40,11 @@ class SessionCredential:
     """
 
     kind: CredentialKind
+    # What tools send to okareo-server. On both key kinds this is the raw
+    # Okareo API key, never the `okmcp_at_` envelope okareo-server can't read.
     api_key: str
     org_id: str
+    # OAuth: the user. Key kinds: the key's `sub`, the user who created it.
     subject: str | None = None
     # User email from the Frontegg JWT `email` claim (OAuth path only).
     # Consumed by analytics for PostHog person identification; never sent

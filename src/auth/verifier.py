@@ -1,35 +1,49 @@
 """``CombinedTokenVerifier`` — the single ``TokenVerifier`` for the remote MCP.
 
 Accepts either a Frontegg-issued JWT (primary OAuth path) or an Okareo API
-key (fallback bearer-header path) on the same bearer slot. The shape choice
-is decided per request by a JWT-syntax heuristic, then routed accordingly:
+key (bearer-header path) on the same bearer slot. Each bearer takes exactly
+one path (specs/048-api-key-shared-connections data-model.md):
 
-- 3-segment dot-separated string → JWT path: verify signature against the
-  cached Frontegg JWKS; check ``iss``, ``aud``, ``exp``, scope, and presence
-  of the ``organization_id`` claim.
-- Anything else → API-key path: hand the value to the supplied
-  ``api_key_resolver`` (typically ``OkareoAPIKeyVerifier.verify``).
+- JWT whose unverified ``type`` is ``apiKey`` (minted by okareo-server) or
+  ``tenantAccessToken`` (legacy, issued by Frontegg) → API-key path:
+  okareo-server decides validity through ``api_key_validator``.
+- Any other JWT → sign-in path: verify signature against the cached Frontegg
+  JWKS; check ``iss``, ``aud``, ``exp``, scope, and the organization claim.
+- ``okmcp_at_…`` → shared connection: decrypt, then the API-key path on the
+  key inside (``shared_connection.py``).
+- Anything else → refused as an invalid key. okareo-server accepts only
+  JWTs, so asking it would be pointless.
 
-Either way, on success the verifier:
-1. Binds the resulting ``SessionCredential`` to the per-request ContextVar.
-2. Returns the SDK's ``AccessToken`` so the auth middleware lets the
-   request through.
+On success the verifier binds the ``SessionCredential`` to the per-request
+ContextVar and returns the SDK's ``AccessToken``.
 
-The verifier MUST NEVER raise: any failure (signature error, expired
-token, unreachable Okareo backend, etc.) returns ``None`` so the SDK can
-emit a clean 401 with the spec-mandated ``WWW-Authenticate`` header.
+Failures differ by path. The sign-in path returns ``None`` so the SDK emits
+its own 401, unchanged since before 048. The API-key path raises
+``InvalidAPIKeyError`` (401 that says what to fix) or
+``CredentialUnavailableError`` (503), which ``OkareoFastMCP`` renders; an
+okareo-server outage must never read as "your key is wrong".
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
 import jwt as pyjwt
 from mcp.server.auth.provider import AccessToken, TokenVerifier
+from starlette.authentication import AuthenticationError
 
-from src.auth.context import SessionCredential, set_session_credential
+from src.auth.api_key_verifier import KeyValidation, looks_like_jwt
+from src.auth.context import CredentialKind, SessionCredential, set_session_credential
+from src.auth.errors import CredentialUnavailableError, InvalidAPIKeyError
+from src.auth.shared_connection import (
+    ACCESS_PREFIX,
+    InvalidSharedTokenError,
+    SharedConnectionKeys,
+    open_token,
+)
 from src.auth.jwks_cache import JWKSCache
 
 
@@ -46,32 +60,28 @@ def _diag(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
-ApiKeyResolver = Callable[[str], Awaitable[SessionCredential | None]]
+ApiKeyValidator = Callable[[str], Awaitable[KeyValidation]]
+
+# `apiKey`: minted by okareo-server since 2026-06-09. `tenantAccessToken`:
+# issued by Frontegg before that, still accepted by okareo-server.
+_API_KEY_TOKEN_TYPES = frozenset({"apiKey", "tenantAccessToken"})
+
+_RECONNECT = "This connection has expired or is not recognised; reconnect."
 
 
-def _looks_like_jwt(token: str) -> bool:
-    """Cheap shape check: three base64url segments separated by dots."""
-    parts = token.split(".")
-    if len(parts) != 3:
-        return False
-    return all(p and all(c.isalnum() or c in "-_" for c in p) for p in parts)
+def _unverified_type(token: str) -> str | None:
+    """The JWT's ``type`` claim, read without verifying anything.
 
-
-def _is_tenant_access_token(token: str) -> bool:
-    """True if the JWT payload carries Frontegg's `type: tenantAccessToken`.
-
-    Okareo issues "API keys" as Frontegg tenant access tokens — JWT-shaped,
-    long-lived (no `exp` claim), and meant to be validated against the
-    Okareo backend rather than via JWT cryptography. They share the JWT
-    shape with short-lived OAuth user tokens but must take a different
-    verification path: handing them to ``pyjwt.decode(require=["exp"])``
-    fails immediately. The `type` claim is the canonical signal.
+    Only used to pick a path; each path then verifies on its own terms.
     """
     try:
         unverified = pyjwt.decode(token, options={"verify_signature": False})
     except pyjwt.InvalidTokenError:
-        return False
-    return isinstance(unverified, dict) and unverified.get("type") == "tenantAccessToken"
+        return None
+    if not isinstance(unverified, dict):
+        return None
+    token_type = unverified.get("type")
+    return token_type if isinstance(token_type, str) else None
 
 
 def _normalize_url(url: str) -> str:
@@ -88,14 +98,18 @@ class CombinedTokenVerifier(TokenVerifier):
         issuer_url: str,
         resource_server_url: str,
         jwks_cache: JWKSCache,
-        api_key_resolver: ApiKeyResolver,
+        api_key_validator: ApiKeyValidator,
         required_scope: str = "okareo:use",
         additional_audiences: list[str] | None = None,
+        shared_keys: SharedConnectionKeys | None = None,
     ) -> None:
         self._issuer = _normalize_url(issuer_url)
         self._resource = _normalize_url(resource_server_url)
         self._jwks = jwks_cache
-        self._resolve_api_key = api_key_resolver
+        self._validate_api_key = api_key_validator
+        # None when MCP_DCR_SIGNING_KEY is not configured: a token sealed
+        # with an ephemeral per-instance key could not be opened elsewhere.
+        self._shared_keys = shared_keys
         self._required_scope = required_scope
         # Additional acceptable `aud` claim values beyond the resource URL.
         # The MCP spec (RFC 8707) wants aud = resource server URL, but
@@ -107,16 +121,17 @@ class CombinedTokenVerifier(TokenVerifier):
 
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
-            if _looks_like_jwt(token):
-                # Frontegg tenant access tokens are JWT-shaped Okareo API
-                # keys (long-lived, no `exp`). Route them through the
-                # API-key path so the Okareo backend is the source of
-                # truth on validity — JWT validation would reject them
-                # for the missing `exp` claim.
-                if _is_tenant_access_token(token):
-                    return await self._verify_api_key(token)
-                return await self._verify_jwt(token)
-            return await self._verify_api_key(token)
+            if token.startswith(ACCESS_PREFIX):
+                return await self._verify_shared(token)
+            if not looks_like_jwt(token):
+                raise InvalidAPIKeyError()
+            if _unverified_type(token) in _API_KEY_TOKEN_TYPES:
+                # API keys carry no `exp` and are not signed by Frontegg, so
+                # the JWKS path would reject every one of them (048 R1).
+                return await self._verify_api_key(token)
+            return await self._verify_jwt(token)
+        except AuthenticationError:
+            raise
         except Exception as exc:
             # Defensive: any unexpected exception becomes a 401, not a 500.
             _logger.warning(
@@ -251,29 +266,57 @@ class CombinedTokenVerifier(TokenVerifier):
             resource=self._resource,
         )
 
-    async def _verify_api_key(self, token: str) -> AccessToken | None:
+    async def _verify_shared(self, token: str) -> AccessToken:
+        if self._shared_keys is None:
+            raise InvalidAPIKeyError(_RECONNECT)
         try:
-            credential = await self._resolve_api_key(token)
+            payload = open_token(token, self._shared_keys, "at")
+        except InvalidSharedTokenError:
+            raise InvalidAPIKeyError(_RECONNECT) from None
+        # The key inside is checked on every request, so revoking it cuts the
+        # connection off however long the envelope still has to run.
+        return await self._verify_api_key(
+            payload["k"], kind="shared_api_key", presented=token
+        )
+
+    async def _verify_api_key(
+        self,
+        token: str,
+        kind: CredentialKind = "api_key",
+        presented: str | None = None,
+    ) -> AccessToken:
+        try:
+            result = await self._validate_api_key(token)
         except Exception as exc:
+            # Fail closed, and as "could not check" rather than "invalid":
+            # the key may well be fine.
             _diag(
-                f"[verifier] API-key path: resolver raised "
-                f"{type(exc).__name__}: {exc!r}"
+                f"[verifier] API-key path: validator raised {type(exc).__name__}"
             )
-            return None
+            raise CredentialUnavailableError() from None
 
-        if credential is None:
-            _diag(
-                "[verifier] API-key path: resolver returned None — Okareo "
-                "rejected the key, the account has no projects, or "
-                "OKAREO_BASE_URL points at the wrong environment."
-            )
-            return None
+        if result.outcome == "unavailable":
+            raise CredentialUnavailableError()
+        if result.outcome != "valid" or not result.tenant_id:
+            raise InvalidAPIKeyError()
 
+        expires_at = (
+            datetime.fromtimestamp(result.expires_at, tz=timezone.utc)
+            if result.expires_at is not None
+            else None
+        )
+        credential = SessionCredential(
+            kind=kind,
+            api_key=token,
+            org_id=result.tenant_id,
+            subject=result.subject,
+            expires_at=expires_at,
+        )
         set_session_credential(credential)
         return AccessToken(
-            token=token,
-            client_id=credential.org_id,
+            token=presented or token,
+            client_id=result.tenant_id,
             scopes=list(credential.scopes),
-            expires_at=None,
+            expires_at=result.expires_at,
             resource=self._resource,
         )

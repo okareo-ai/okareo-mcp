@@ -10,6 +10,11 @@ appends custom routes after its own, so the only hook is the Starlette app
 ``streamable_http_app()`` returns.
 
 See specs/046-oauth-issuer-exact-match/research.md R3–R5 and R10–R11.
+
+The same hook gives the SDK's ``AuthenticationMiddleware`` an ``on_error``,
+so API-key failures raised by the verifier become a 401 that names the key or
+a 503 when okareo-server is unreachable, instead of Starlette's plain-text 400
+(specs/048-api-key-shared-connections research R6).
 """
 
 from __future__ import annotations
@@ -23,9 +28,13 @@ from mcp.server.fastmcp import FastMCP
 from mcp.shared.auth import ProtectedResourceMetadata
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.authentication import AuthenticationError
+from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.requests import HTTPConnection, Request
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
+
+from src.auth.errors import CredentialUnavailableError, InvalidAPIKeyError
 
 _logger = logging.getLogger(__name__)
 
@@ -66,6 +75,33 @@ def _protected_resource_route(path: str, auth: AuthSettings) -> Route:
     )
 
 
+def _auth_error_handler(resource_metadata_url: str):
+    def _on_error(conn: HTTPConnection, exc: AuthenticationError) -> Response:  # noqa: ARG001
+        if isinstance(exc, CredentialUnavailableError):
+            return JSONResponse(
+                {"error": "temporarily_unavailable", "error_description": exc.description},
+                status_code=503,
+                headers={"Retry-After": "5"},
+            )
+        if isinstance(exc, InvalidAPIKeyError):
+            # Same header shape as the SDK's own 401, so a client that
+            # rediscovers from `resource_metadata` behaves the same either way.
+            www_authenticate = (
+                f'Bearer error="invalid_token", '
+                f'error_description="{exc.description}", '
+                f'resource_metadata="{resource_metadata_url}"'
+            )
+            return JSONResponse(
+                {"error": "invalid_token", "error_description": exc.description},
+                status_code=401,
+                headers={"WWW-Authenticate": www_authenticate},
+            )
+        # Starlette's own default for anything else.
+        return PlainTextResponse(str(exc), status_code=400)
+
+    return _on_error
+
+
 class OkareoFastMCP(FastMCP):
     """``FastMCP`` whose protected resource document names the authorization
     server exactly as that server's ``issuer`` names itself.
@@ -79,20 +115,38 @@ class OkareoFastMCP(FastMCP):
         auth = self.settings.auth
         if auth is None or auth.resource_server_url is None:
             return app
-        path = urlparse(
-            str(build_resource_metadata_url(auth.resource_server_url))
-        ).path
-        routes = app.router.routes
-        for index, route in enumerate(routes):
-            if isinstance(route, Route) and route.path == path:
-                routes[index] = _protected_resource_route(path, auth)
-                return app
-        # A newer SDK that mounts the document elsewhere, or not at all, would
-        # otherwise put the trailing slash back in production without a trace.
-        _logger.warning(
-            "Auth settings are present but the SDK registered no route at %s; "
-            "the protected resource document is being served by the SDK, whose "
-            "authorization_servers may not equal the authorization server's issuer.",
-            path,
-        )
+        metadata_url = str(build_resource_metadata_url(auth.resource_server_url))
+        _replace_protected_resource_route(app, urlparse(metadata_url).path, auth)
+        _install_auth_error_handler(app, metadata_url)
         return app
+
+
+def _replace_protected_resource_route(app: Starlette, path: str, auth: AuthSettings) -> None:
+    routes = app.router.routes
+    for index, route in enumerate(routes):
+        if isinstance(route, Route) and route.path == path:
+            routes[index] = _protected_resource_route(path, auth)
+            return
+    # A newer SDK that mounts the document elsewhere, or not at all, would
+    # otherwise put the trailing slash back in production without a trace.
+    _logger.warning(
+        "Auth settings are present but the SDK registered no route at %s; "
+        "the protected resource document is being served by the SDK, whose "
+        "authorization_servers may not equal the authorization server's issuer.",
+        path,
+    )
+
+
+def _install_auth_error_handler(app: Starlette, resource_metadata_url: str) -> None:
+    # The SDK builds this middleware inside streamable_http_app() with no
+    # on_error, and Starlette builds the middleware stack lazily on the first
+    # request, so setting the kwarg here takes effect.
+    for entry in app.user_middleware:
+        if entry.cls is AuthenticationMiddleware:
+            entry.kwargs["on_error"] = _auth_error_handler(resource_metadata_url)
+            return
+    _logger.warning(
+        "Auth settings are present but the SDK built no AuthenticationMiddleware; "
+        "an invalid API key will not get its explanatory 401 and an okareo-server "
+        "outage will not get its 503."
+    )
