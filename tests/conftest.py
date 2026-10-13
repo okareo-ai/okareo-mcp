@@ -25,6 +25,56 @@ def mock_okareo_client():
         yield mock_instance
 
 
+@pytest.fixture
+def stand_in_model():
+    """Build a real ``ModelUnderTest`` of the installed Okareo SDK the way
+    ``run_simulation`` builds its stand-in model. On okareo 0.0.159 its
+    datapoint thread starts when it is built (049, research R15)."""
+    import datetime
+    from uuid import UUID
+
+    from okareo.model_under_test import ModelUnderTest
+    from okareo_api_client import Client
+    from okareo_api_client.models.model_under_test_response import (
+        ModelUnderTestResponse,
+    )
+
+    def _build(client=None):
+        response = ModelUnderTestResponse(
+            id=UUID(int=0),
+            project_id=UUID(int=0),
+            name="voice-target",
+            tags=[],
+            time_created=datetime.datetime.now().isoformat(),
+            version=1,
+        )
+        return ModelUnderTest(
+            client=client
+            or Client(base_url="http://127.0.0.1:9", raise_on_unexpected_status=True),
+            api_key="k",
+            mut=response,
+            models={"voice": {"type": "voice"}},
+        )
+
+    return _build
+
+
+@pytest.fixture
+def projects_request_timeouts(monkeypatch):
+    """Answer the ``GET /v0/projects`` the ``Okareo`` constructor makes, with
+    no network, and record the timeout of the HTTP client it went out on."""
+    import okareo.okareo as sdk_okareo
+
+    seen = []
+
+    def _projects(*, client, api_key):
+        seen.append(client.get_httpx_client().timeout)
+        return []
+
+    monkeypatch.setattr(sdk_okareo.get_all_projects_v0_projects_get, "sync", _projects)
+    return seen
+
+
 # ---------------------------------------------------------------------------
 # Auth fixtures (used by tests/unit/auth/* and tests/integration/*).
 # In-process RSA keypair + JWKS so tests can sign and validate JWTs without
@@ -144,7 +194,8 @@ def sim_submission():
     target inside the acting project and builds the run itself, so assertions
     about what was submitted moved from that SDK call to `ModelUnderTest.run_test`.
 
-    Yields the patched `run_test` mock. `simulation_params` on it carries the
+    Yields the patched submission mock (both `submit_test` and `run_test`).
+    `simulation_params` on it carries the
     per-run knobs (repeats, max_turns, stop_check, ...); `checks` stays a
     top-level keyword.
     """
@@ -177,10 +228,18 @@ def sim_submission():
             return translated
         return default
 
+    # 049: Targets the backend queues (custom endpoints, voice, generation)
+    # are submitted; the rest keep run_test. One mock stands in for both start
+    # methods, so the assertions read what reached the SDK whichever path the
+    # Target takes. It reports the Run finished, as run_test returning did.
+    submission = MagicMock()
+    submission.return_value = MagicMock(
+        id="run-1", name="sim", app_link="https://app.okareo.com/r",
+        status="FINISHED", failure_message=None,
+    )
     with patch(
         "src.tools.simulations.resolve_artifact_by_name", side_effect=_resolve
-    ), patch("okareo.model_under_test.ModelUnderTest.run_test") as run_test:
-        run_test.return_value = MagicMock(
-            id="run-1", name="sim", app_link="https://app.okareo.com/r"
-        )
-        yield run_test
+    ), patch("okareo.model_under_test.ModelUnderTest.run_test", submission), patch(
+        "okareo.model_under_test.ModelUnderTest.submit_test", submission
+    ):
+        yield submission

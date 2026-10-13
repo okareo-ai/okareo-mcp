@@ -1,6 +1,6 @@
 [project]
 name = "okareo-mcp"
-version = "0.0.55"
+version = "0.0.56"
 description = "Okareo MCP server for AI model evaluation"
 readme = "README.md"
 license = "Apache-2.0"
@@ -18,8 +18,15 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 dependencies = [
-    "mcp[cli]>=1.27",
+    # 2.x renamed FastMCP and changed the internals the server relies on.
+    "mcp[cli]>=1.27,<2",
     "okareo>=0.0.159,<0.0.160",
+    # Worker threads for tools (src/tool_threads.py); installed today only
+    # through mcp. 4.5 is the oldest mcp accepts.
+    "anyio>=4.5,<5",
+    # attrs.evolve copies the API client without a timeout (src/run_start.py);
+    # installed today only through okareo. 22.2 added field-alias support.
+    "attrs>=22.2,<26",
     "httpx",
     "PyJWT[crypto]>=2.9",
     "cryptography>=42",
@@ -50,17 +57,21 @@ okareo-mcp-setup = "src.setup_cli:main"
 [project.optional-dependencies]
 dev = [
     "pytest",
+    "pytest-timeout>=2.3,<3",
     "ruff",
 ]
 
 [dependency-groups]
 dev = [
     "pytest",
+    "pytest-timeout>=2.3,<3",
     "ruff",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A test that hangs fails instead of stalling CI and the deploy behind it.
+timeout = 120
 filterwarnings = [
     # Third-party: the okareo SDK subclasses mcp's ClientSession. We can't fix
     # the source; scope the ignore to that one class so our own deprecations

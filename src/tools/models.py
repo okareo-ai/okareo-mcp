@@ -27,6 +27,7 @@ from src.okareo_client import (
     project_scoped,
     resolve_project,
 )
+from src.okareo_sdk_workarounds import close_model
 
 
 def _get_attr(obj, attr, default=None):
@@ -164,6 +165,9 @@ def register_tools(mcp: FastMCP) -> None:
             )
         except Exception as e:
             return format_tool_error(e)
+        # okareo 0.0.159 starts a thread for every model it hands back, and
+        # nothing else would stop it (049, research R15).
+        close_model(mut)
 
         return json.dumps({
             "id": _get_attr(mut, "id", ""),
@@ -380,6 +384,7 @@ def register_tools(mcp: FastMCP) -> None:
             )
         except Exception as e:
             return format_tool_error(e)
+        close_model(mut)  # as in register_generation_model
 
         return json.dumps({
             "id": _get_attr(mut, "mut_id", ""),

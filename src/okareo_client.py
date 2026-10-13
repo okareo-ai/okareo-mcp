@@ -23,6 +23,7 @@ import hashlib
 import inspect
 import json
 import os
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -30,6 +31,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from okareo import Okareo
+from okareo.common import BASE_URL
 from okareo_api_client.models.project_response import ProjectResponse
 
 from src.error_handling import (
@@ -38,6 +40,7 @@ from src.error_handling import (
     ProjectNotFound,
     ProjectNotSelected,
 )
+from src.okareo_sdk_workarounds import OkareoWithTimeout
 
 # The description attached to every project-scoped tool's `project`
 # parameter (FR-016a). It must reach the *parameter schema*, not just the tool
@@ -83,6 +86,15 @@ class ResolvedProject:
 _project_cache: dict[tuple[str, str], tuple[float, list[ProjectResponse]]] = {}
 _PROJECT_CACHE_BOUND = 512
 
+# Tools run side by side (049), so a fetch can be in flight while another call
+# changes the project list and clears the cache. These count the clears — per
+# key, and of the whole cache — so a fetch that started before a clear does
+# not store the list it fetched. Kept outside the cache entries, which a clear
+# deletes. One lock guards the cache and both counts.
+_project_cache_lock = threading.Lock()
+_project_cache_clears: dict[tuple[str, str], int] = {}
+_project_cache_whole_clears = 0
+
 # The TTL is the primary freshness mechanism for out-of-process changes
 # (projects created or renamed in the Okareo web application). Five in-process
 # events now change this list — clone_project (037), and create_project,
@@ -92,11 +104,26 @@ _PROJECT_CACHE_BOUND = 512
 # next call contradicts (research R4; 037 CR-1; 040 FR-007).
 _PROJECT_CACHE_TTL_SECONDS = 60.0
 
+# Just under Cloud Run's 300-second request limit (see api_timeout_seconds).
+_HTTP_API_TIMEOUT_SECONDS = 290.0
+
 
 def _reset_for_tests() -> None:
     """Clear every process-scoped cache. Production code must not call this."""
-    _project_cache.clear()
+    global _project_cache_whole_clears
+    with _project_cache_lock:
+        _project_cache.clear()
+        _project_cache_clears.clear()
+        _project_cache_whole_clears = 0
     _reset_name_caches_for_tests()
+
+
+def _clear_whole_project_cache() -> None:
+    """Drop every cached project list; call with the lock held."""
+    global _project_cache_whole_clears
+    _project_cache.clear()
+    _project_cache_clears.clear()
+    _project_cache_whole_clears += 1
 
 
 def invalidate_projects_cache(okareo: Okareo) -> None:
@@ -116,11 +143,18 @@ def invalidate_projects_cache(okareo: Okareo) -> None:
     """
     base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
     try:
-        _project_cache.pop((_project_cache_scope(okareo), base_url), None)
+        cache_key = (_project_cache_scope(okareo), base_url)
     except Exception:
         # Never let cache bookkeeping break the operation that did the work;
         # over-clearing is always safe.
-        _project_cache.clear()
+        with _project_cache_lock:
+            _clear_whole_project_cache()
+        return
+    with _project_cache_lock:
+        _project_cache.pop(cache_key, None)
+        _project_cache_clears[cache_key] = _project_cache_clears.get(cache_key, 0) + 1
+        if len(_project_cache_clears) > _PROJECT_CACHE_BOUND:
+            _clear_whole_project_cache()
 
 
 def _project_cache_scope(okareo: Okareo) -> str:
@@ -133,13 +167,34 @@ def _project_cache_scope(okareo: Okareo) -> str:
     return hashlib.sha256(okareo.api_key.encode("utf-8")).hexdigest()[:16]
 
 
+def api_timeout_seconds() -> float | None:
+    """How long a tool's API request waits for an answer, or None for no limit.
+
+    In HTTP mode Cloud Run ends a request at 300 seconds, after which nobody
+    is listening, so a tool's requests give up after 290 (tunable via
+    OKAREO_API_TIMEOUT_SECONDS) instead of holding a worker thread forever.
+    Local (stdio) installs keep no limit, as before (049, research R8).
+    """
+    if os.environ.get("TRANSPORT", "stdio") != "streamable-http":
+        return None
+    raw = os.environ.get("OKAREO_API_TIMEOUT_SECONDS", "").strip()
+    try:
+        value = float(raw) if raw else _HTTP_API_TIMEOUT_SECONDS
+    except ValueError:
+        value = _HTTP_API_TIMEOUT_SECONDS
+    return value if value > 0 else _HTTP_API_TIMEOUT_SECONDS
+
+
 def create_okareo_client(
     api_key: str,
     base_url: str | None = None,
 ) -> Okareo:
     """Create an Okareo client with the given api_key.
 
-    The Okareo constructor validates the key by calling GET /v0/projects.
+    The Okareo constructor validates the key by calling GET /v0/projects. In
+    HTTP mode the client, that request included, gives up after
+    ``api_timeout_seconds()``; okareo 0.0.159 ignores the constructor's
+    ``timeout``, so ``OkareoWithTimeout`` applies it (049, research R15).
 
     Args:
         api_key: Okareo API key, OR a Frontegg-issued JWT (both are accepted
@@ -153,9 +208,15 @@ def create_okareo_client(
     Raises:
         TypeError: If the api_key is invalid (API returns 401).
     """
+    kwargs: dict = {"api_key": api_key}
     if base_url:
-        return Okareo(api_key=api_key, base_path=base_url)
-    return Okareo(api_key=api_key)
+        kwargs["base_path"] = base_url
+    timeout = api_timeout_seconds()
+    if timeout is None:
+        return Okareo(**kwargs)
+    return OkareoWithTimeout(
+        api_key=api_key, base_path=base_url or BASE_URL, timeout=timeout
+    )
 
 
 def get_okareo_client() -> Okareo:
@@ -273,14 +334,22 @@ def get_projects_cached(okareo: Okareo) -> list[ProjectResponse]:
     base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
     cache_key = (_project_cache_scope(okareo), base_url)
 
-    entry = _project_cache.get(cache_key)
-    if entry is not None and (time.monotonic() - entry[0]) < _PROJECT_CACHE_TTL_SECONDS:
-        return entry[1]
+    with _project_cache_lock:
+        entry = _project_cache.get(cache_key)
+        if entry is not None and (time.monotonic() - entry[0]) < _PROJECT_CACHE_TTL_SECONDS:
+            return entry[1]
+        clears_before = (_project_cache_clears.get(cache_key, 0), _project_cache_whole_clears)
 
     projects = list(okareo.get_projects())
-    if len(_project_cache) >= _PROJECT_CACHE_BOUND:
-        _project_cache.clear()
-    _project_cache[cache_key] = (time.monotonic(), projects)
+
+    with _project_cache_lock:
+        clears_now = (_project_cache_clears.get(cache_key, 0), _project_cache_whole_clears)
+        if clears_now == clears_before:
+            if len(_project_cache) >= _PROJECT_CACHE_BOUND:
+                # Only frees space; nothing changed in the backend, so this
+                # fetch is still current and is stored below.
+                _project_cache.clear()
+            _project_cache[cache_key] = (time.monotonic(), projects)
     return projects
 
 
@@ -664,11 +733,10 @@ def okareo_api_request(
         json: Optional JSON request body.
         params: Optional query parameters.
         timeout: Optional per-request timeout, in seconds. Omitted by
-            default so the client's own configuration decides — note that
-            ``Okareo.__init__`` never forwards its ``timeout`` to the
-            generated ``Client``, whose ``_timeout`` therefore stays
-            ``None``, which httpx reads as *no timeout at all*. A tool
-            calling a long-running route must pass one explicitly.
+            default so the client's own configuration decides: in HTTP mode
+            the tool client gives up after ``api_timeout_seconds()``; in
+            stdio mode it has no timeout. A tool calling a long-running route
+            passes its own.
 
     Returns:
         The parsed JSON response body, or ``None`` for an empty 2xx response.

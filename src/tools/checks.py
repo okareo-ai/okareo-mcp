@@ -23,6 +23,7 @@ from src.error_handling import format_tool_error
 from src.okareo_client import organization_scoped
 from src.okareo_client import get_okareo_client
 from src.okareo_client import okareo_api_request
+from src.okareo_client import api_timeout_seconds
 
 
 def _get_attr(obj, attr, default=None):
@@ -104,6 +105,7 @@ _SHARED_NOTE = (
 # own answer as late as ~660s, and the margin covers it with room to spare.
 _CALIBRATE_TIMEOUT_SECONDS = 720
 
+
 # Mirrors CheckCalibrateRequest.name's max_length on the route. The reserved-
 # name rule that route also applies is deliberately not mirrored — see
 # specs/042-calibrate-check/data-model.md.
@@ -135,6 +137,16 @@ _RUN_INELIGIBLE_422_PHRASES = (
     "has unsupported type",
 )
 
+
+def calibrate_timeout_seconds() -> float:
+    """How long calibrate_check waits: 720 s in stdio mode (see the constant).
+    In HTTP mode Cloud Run ends the request at 300 s, before either number,
+    so the wait matches every other tool request there (049, research R8)
+    instead of holding a worker thread after the caller has gone."""
+    http_timeout = api_timeout_seconds()
+    if http_timeout is None:
+        return float(_CALIBRATE_TIMEOUT_SECONDS)
+    return min(float(_CALIBRATE_TIMEOUT_SECONDS), http_timeout)
 
 def _calibration_refusal(error: httpx.HTTPStatusError) -> str:
     """Map a non-2xx calibration response onto guidance the agent can act on."""
@@ -879,7 +891,7 @@ def register_tools(mcp: FastMCP) -> None:
                     "name": name,
                     "inspect_only": inspect_only,
                 },
-                timeout=_CALIBRATE_TIMEOUT_SECONDS,
+                timeout=calibrate_timeout_seconds(),
             )
         except httpx.HTTPStatusError as e:
             return _calibration_refusal(e)

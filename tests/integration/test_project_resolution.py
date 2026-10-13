@@ -248,14 +248,16 @@ def _reps_target():
     return mut
 
 
-def _invoke_thunk(submit_thunk, **_kw):
-    """Actually run the submission, so the SDK path under test executes.
+def _invoke_start(build_model, **kw):
+    """Actually start the Run, so the SDK path under test executes.
 
-    Stubbing _buffered_submit's return value would skip the thunk entirely —
-    and the thunk is where the unscoped lookup happens. A test that skips it
+    Stubbing start_run's return value would skip the start entirely — and the
+    start is where an unscoped lookup would happen. A test that skips it
     passes against the unfixed code, which is how this defect shipped.
     """
-    result = submit_thunk()
+    mut = build_model(MagicMock())
+    method = mut.submit_test if kw["submit"] else mut.run_test
+    result = method(**kw["run_kwargs"])
     return ("finished", result, "run-1", "https://app")
 
 
@@ -299,10 +301,13 @@ class TestArtifactsAreUsableInTheProjectThatListsThem:
             _default_pkg, "get_all_models_under_test_v0_models_under_test_get",
             mut_mod, create=True,
         ), patch(
-            "src.tools.simulations._buffered_submit",
-            side_effect=_invoke_thunk,
+            "src.tools.simulations.start_run",
+            side_effect=_invoke_start,
         ), patch(
             "okareo.model_under_test.ModelUnderTest.run_test",
+            return_value=MagicMock(),
+        ), patch(
+            "okareo.model_under_test.ModelUnderTest.submit_test",
             return_value=MagicMock(),
         ):
             out = json.loads(_sim_tools()["run_simulation"](
@@ -311,6 +316,10 @@ class TestArtifactsAreUsableInTheProjectThatListsThem:
                 target_name="checkout-agent",
                 project="REPS",
             ))
+        # The Target is a custom endpoint, so the Run is submitted (049); the
+        # stand-in model keeps the project-scoped lookup and never rewrites
+        # the user's Target, as okareo.run_simulation would.
+        assert not okareo.create_or_update_target.called
         return out, mut_mod
 
     def test_run_simulation_resolves_the_target_inside_the_acting_project(self):

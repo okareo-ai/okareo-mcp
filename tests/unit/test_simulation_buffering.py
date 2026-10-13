@@ -1,14 +1,12 @@
-"""Unit tests for the faux-async simulation handoff (spec 025).
+"""Unit tests for the simulation handoff (spec 025).
 
-Covers the runtime estimate, the bounded background-thread buffering
-(finished / running / failed outcomes), and the handoff response builder.
+Covers the runtime estimate and the handoff response builder. Starting a Run
+and its finished / running / failed outcomes moved to src/run_start.py and
+are tested in test_run_start.py (049).
 """
-
-import threading
 
 from src.tools.simulations import (
     _build_handoff_response,
-    _buffered_submit,
     _estimate_runtime_seconds,
     _format_duration,
 )
@@ -45,70 +43,6 @@ class TestEstimate:
     def test_format_duration(self):
         assert _format_duration(45).endswith("s")
         assert "min" in _format_duration(600)
-
-
-class TestBufferedSubmit:
-    def test_finished_inline(self, monkeypatch):
-        monkeypatch.setattr(
-            "src.tools.simulations._find_runs", lambda *a, **k: {}
-        )
-        status, payload, run_id, link = _buffered_submit(
-            lambda: _fake_result("done-1"),
-            okareo=None,
-            project_id="p",
-            scenario_set_id="s",
-            name="the-run",
-        )
-        assert status == "finished"
-        assert payload.id == "done-1"
-
-    def test_failed_inline(self, monkeypatch):
-        monkeypatch.setattr(
-            "src.tools.simulations._find_runs", lambda *a, **k: {}
-        )
-
-        def boom():
-            raise ValueError("bad config")
-
-        status, payload, run_id, link = _buffered_submit(
-            boom, okareo=None, project_id="p", scenario_set_id="s", name="the-run"
-        )
-        assert status == "failed"
-        assert isinstance(payload, ValueError)
-
-    def test_running_handoff_returns_discovered_id(self, monkeypatch):
-        monkeypatch.setenv("OKAREO_SIM_BUFFER_SECONDS", "0.3")
-        monkeypatch.setattr("src.tools.simulations._SIM_POLL_INTERVAL_SECONDS", 0.05)
-
-        release = threading.Event()
-        calls = {"n": 0}
-
-        def fake_find(okareo, project_id, scenario_set_id, types):
-            calls["n"] += 1
-            if calls["n"] == 1:  # snapshot before the run is created
-                return {}
-            return {"new-run-1": {"name": "the-run", "app_link": "http://app/new"}}
-
-        monkeypatch.setattr("src.tools.simulations._find_runs", fake_find)
-
-        def blocker():
-            release.wait(5)
-            return _fake_result()
-
-        try:
-            status, payload, run_id, link = _buffered_submit(
-                blocker,
-                okareo=None,
-                project_id="p",
-                scenario_set_id="s",
-                name="the-run",
-            )
-            assert status == "running"
-            assert payload is None
-            assert run_id == "new-run-1"
-            assert link == "http://app/new"
-        finally:
-            release.set()  # let the daemon thread complete
 
 
 class TestHandoffResponse:

@@ -15,7 +15,6 @@ Provides nine MCP tools for the multi-turn simulation workflow:
 """
 
 import json
-import os
 import re
 from typing import Annotated, Optional
 
@@ -38,6 +37,7 @@ from src.okareo_client import (
     resolve_project,
 )
 from src.run_config import resolve_run_config
+from src.run_start import start_run, submits
 from src.response_depth import (
     DEPTHS_LISTING,
     DETAILED,
@@ -369,33 +369,10 @@ def _voice_language(voices, voice: str):
     return None
 
 
-# --- Long-running simulation buffering (spec 025-long-running-simulations) ---
-# run_test executes synchronously on the backend and *survives client
-# disconnect*: the backend handler runs to completion in its own threadpool
-# thread regardless of the caller, and the run is finalized inside that still-
-# open request (validated empirically; see specs/025-long-running-simulations/
-# research.md). So we run the blocking submission in a background thread and,
-# after giving the run a moment to register, look it up via find_test_runs to
-# hand the co-pilot a pollable run id — a faux-async handoff that keeps the tool
-# call well under the client timeout while the run finishes on its own.
-
-_SIM_BUFFER_SECONDS_DEFAULT = 25
-_SIM_POLL_INTERVAL_SECONDS = 2.0
-
-
-def _sim_buffer_seconds() -> float:
-    """Buffer window (seconds) to wait inline before handing off. Tunable via
-    OKAREO_SIM_BUFFER_SECONDS; kept safely under the co-pilot tool-call timeout."""
-    raw = os.environ.get("OKAREO_SIM_BUFFER_SECONDS", "").strip()
-    if raw:
-        try:
-            val = float(raw)
-            if val >= 0:
-                return val
-        except ValueError:
-            pass
-    return float(_SIM_BUFFER_SECONDS_DEFAULT)
-
+# --- Long-running simulation handoff (spec 025, 049) ---
+# A call starts its Run and hands back within a buffer window, while the Run
+# finishes on its own. Starting the Run and finding its id live in
+# src/run_start.py; the estimate and the response builder stay here.
 
 def _estimate_runtime_seconds(row_count, max_turns, repeats, is_voice) -> int:
     """Rough, advisory wall-clock estimate for a simulation run.
@@ -415,108 +392,6 @@ def _format_duration(seconds) -> str:
     if seconds < 90:
         return f"~{seconds}s"
     return f"~{round(seconds / 60)} min"
-
-
-def _find_runs(okareo, project_id, scenario_set_id, types) -> dict:
-    """Best-effort ``{run_id: {"name":, "app_link":}}`` for runs of a scenario,
-    filtered to the given test-run ``types``. Never raises — returns ``{}`` on any
-    error so discovery failures degrade to a handoff without an id rather than
-    breaking the tool."""
-    try:
-        from okareo_api_client.errors import UnexpectedStatus
-        from okareo_api_client.models.general_find_payload import GeneralFindPayload
-
-        payload = GeneralFindPayload(
-            project_id=project_id,
-            scenario_set_id=scenario_set_id,
-            types=list(types),
-            return_model_metrics=False,
-        )
-        try:
-            runs = find_test_runs(okareo, payload)
-        except UnexpectedStatus as ue:
-            runs = json.loads(ue.content) if ue.status_code == 200 else None
-        out: dict = {}
-        if runs and not isinstance(runs, Exception):
-            for r in runs:
-                rid = r.get("id") if isinstance(r, dict) else _get_attr(r, "id")
-                if not rid:
-                    continue
-                out[str(rid)] = {
-                    "name": r.get("name") if isinstance(r, dict) else _get_attr(r, "name"),
-                    "app_link": (
-                        r.get("app_link") if isinstance(r, dict)
-                        else _get_attr(r, "app_link")
-                    ) or "",
-                }
-        return out
-    except Exception:
-        return {}
-
-
-def _buffered_submit(
-    submit_thunk, *, okareo, project_id, scenario_set_id, name, types=None
-):
-    """Run a blocking run/simulation submission in a background thread; return
-    early as a faux-async handoff if it exceeds the buffer window.
-
-    ``types`` filters run discovery (defaults to MULTI_TURN for simulations).
-
-    Returns ``(status, payload, run_id, app_link)``:
-      - ``("finished", result, run_id, app_link)`` — completed within the window
-      - ``("running",  None,   run_id, app_link)`` — handed off, still running
-      - ``("failed",   exception, run_id, app_link)`` — raised before the window
-    """
-    import threading
-    import time
-
-    if types is None:
-        from okareo_api_client.models.test_run_type import TestRunType
-        types = [TestRunType.MULTI_TURN]
-
-    holder: dict = {}
-
-    def _runner():
-        try:
-            holder["result"] = submit_thunk()
-        except BaseException as exc:  # capture everything to surface inline
-            holder["error"] = exc
-
-    # Snapshot existing runs first so the newly created one is identifiable.
-    pre_existing = set(
-        _find_runs(okareo, project_id, scenario_set_id, types).keys()
-    )
-
-    thread = threading.Thread(
-        target=_runner, name=f"okareo-sim-{name}"[:64], daemon=True
-    )
-    thread.start()
-
-    deadline = time.monotonic() + _sim_buffer_seconds()
-    run_id = None
-    app_link = ""
-
-    while True:
-        # Returns as soon as the run finishes, else after one poll interval.
-        thread.join(timeout=_SIM_POLL_INTERVAL_SECONDS)
-        if not thread.is_alive():
-            break
-        if run_id is None:
-            current = _find_runs(okareo, project_id, scenario_set_id, types)
-            new_ids = [rid for rid in current if rid not in pre_existing]
-            match = [rid for rid in new_ids if current[rid].get("name") == name]
-            chosen = match[0] if match else (new_ids[0] if len(new_ids) == 1 else None)
-            if chosen:
-                run_id = chosen
-                app_link = current[chosen].get("app_link", "")
-        if time.monotonic() >= deadline:
-            break
-
-    if not thread.is_alive():
-        if "error" in holder:
-            return ("failed", holder["error"], run_id, app_link)
-        return ("finished", holder["result"], run_id, app_link)
-    return ("running", None, run_id, app_link)
 
 
 def _build_handoff_response(
@@ -2373,9 +2248,10 @@ def register_tools(mcp: FastMCP) -> None:
         # but still not `silence_timeout_ms` — and this bypass also performs
         # the voice-target preflight (augmentation on a non-voice target is
         # rejected with a targeted error) that okareo.run_simulation does not.
-        # Both extras therefore keep routing through mut.run_test with an
+        # Both extras therefore keep going through the stand-in model with an
         # AugmentedSimulation (see specs/023-tool-fixes/research.md R1, R4 and
-        # specs/032-mcp-guidance-fixes/capability-review.md).
+        # specs/032-mcp-guidance-fixes/capability-review.md); start_run submits
+        # it like any other voice Run (049).
         use_augmented_path = (
             augmentation is not None or silence_timeout_ms is not None
         )
@@ -2515,51 +2391,54 @@ def register_tools(mcp: FastMCP) -> None:
                     time_created=datetime.datetime.now().isoformat(),
                     version=1,
                 )
-                mut = ModelUnderTest(
-                    client=okareo.client,
-                    api_key=okareo.api_key,
-                    mut=dummy_response,
-                    models={target_dict["type"]: target_dict},
-                )
+                # Targets the backend queues are submitted, and the API
+                # answers with the Run; everything else runs with run_test.
+                # start_run builds the model on the client its path needs
+                # (049, research R5, R8).
+                submits_run = submits(target_dict["type"])
 
-                def submit_thunk(
-                    _mut=mut, _sim_params=sim_params,
-                    _driver_model=driver_model, _TestRunType=TestRunType,
-                ):
-                    return _mut.run_test(
-                        scenario=resolved_scenario,
-                        name=name,
+                def build_model(client, _models={target_dict["type"]: target_dict}):
+                    return ModelUnderTest(
+                        client=client,
                         api_key=okareo.api_key,
-                        api_keys=key_registry or None,
-                        metrics_kwargs=None,
-                        test_run_type=_TestRunType.MULTI_TURN,
-                        calculate_metrics=True,
-                        checks=checks or [],
-                        simulation_params=_sim_params,
-                        driver_id=(
-                            str(_driver_model.id)
-                            if _driver_model and getattr(_driver_model, "id", None)
-                            else None
-                        ),
+                        mut=dummy_response,
+                        models=_models,
                     )
+
+                run_kwargs = dict(
+                    scenario=resolved_scenario,
+                    name=name,
+                    api_key=okareo.api_key,
+                    api_keys=key_registry or None,
+                    metrics_kwargs=None,
+                    test_run_type=TestRunType.MULTI_TURN,
+                    calculate_metrics=True,
+                    checks=checks or [],
+                    simulation_params=sim_params,
+                    driver_id=(
+                        str(driver_model.id)
+                        if driver_model and getattr(driver_model, "id", None)
+                        else None
+                    ),
+                )
             except Exception as e:
                 return format_tool_error(e, key_registry)
             is_voice = target_type == "voice"
 
-        # --- Faux-async handoff (spec 025): run the blocking submission in a
-        # background thread, discover the run id, and return within the buffer
-        # window so the co-pilot is never blocked. The run finishes on its own.
+        # Handoff (spec 025): hand back within the buffer window with the
+        # Run's id; the Run finishes on its own.
         scenario_set_id = _get_attr(resolved_scenario, "scenario_id")
         estimate_seconds = _estimate_runtime_seconds(
             row_count, max_turns, repeats, is_voice
         )
 
-        status, payload_obj, run_id, app_link = _buffered_submit(
-            submit_thunk,
+        status, payload_obj, run_id, app_link = start_run(
+            build_model,
+            submit=submits_run,
+            run_kwargs=run_kwargs,
             okareo=okareo,
             project_id=project_id,
             scenario_set_id=scenario_set_id,
-            name=name,
         )
         # Annotate in the tool stack (not the worker thread) so the ContextVar
         # binding is visible to the wrapper.

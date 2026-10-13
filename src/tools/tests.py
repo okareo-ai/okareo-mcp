@@ -31,6 +31,7 @@ from src.okareo_client import (
     resolve_run_provenance,
 )
 from src.run_config import rerun_block, resolve_run_config
+from src.run_start import start_run
 from src.response_depth import (
     DEPTHS_LISTING,
     DEPTHS_RUN,
@@ -503,15 +504,23 @@ def register_tools(mcp: FastMCP) -> None:
             _resp = resolve_artifact_by_name(
                 okareo, model_name, project_id, kind="model"
             )
-            _models = _get_attr(_resp, "models") or {}
+            # The listing returns `models` as the generated container, never a
+            # plain dict; convert it the way okareo.get_model() does, or the
+            # SDK finds no model keys and refuses the Run before requesting it.
+            _models = _get_attr(_resp, "models")
+            _models = _models.to_dict() if hasattr(_models, "to_dict") else (_models or {})
             if not isinstance(_models, dict):
                 _models = {}
-            mut = ModelUnderTest(
-                client=okareo.client,
-                api_key=okareo.api_key,
-                mut=_resp,
-                models=_models,
-            )
+            # start_run builds the model when it starts the Run, on a client
+            # without the tool client's timeout: run_test holds its request
+            # open until the Run ends (049, research R8).
+            def build_model(client, _resp=_resp, _models=_models):
+                return ModelUnderTest(
+                    client=client,
+                    api_key=okareo.api_key,
+                    mut=_resp,
+                    models=_models,
+                )
         except ArtifactNotInProject as e:
             # FR-030: keep the structured outcome — it names the
             # project searched and what is available there.
@@ -555,11 +564,10 @@ def register_tools(mcp: FastMCP) -> None:
             if lifespan_ctx and isinstance(lifespan_ctx, dict):
                 key_registry = dict(lifespan_ctx.get("key_registry", {}))
 
-        # Run the test through the faux-async buffer (spec 025): run_test blocks
-        # until the backend finishes, so run it on a background thread and hand the
-        # co-pilot a pollable id within the buffer window. The run survives the
-        # early return and finishes on its own (see specs/025/research.md).
-        from src.tools.simulations import _build_handoff_response, _buffered_submit
+        # Hand back within the buffer window (spec 025). A single-turn test
+        # runs inside its request on the backend, so it keeps run_test on a
+        # background thread and is found by its call's tag (049, research R5).
+        from src.tools.simulations import _build_handoff_response
 
         run_name = name or f"{scenario_name}-{model_name}"
         test_kwargs = dict(
@@ -571,15 +579,13 @@ def register_tools(mcp: FastMCP) -> None:
         if key_registry:
             test_kwargs["api_keys"] = key_registry
 
-        def submit_thunk(_kwargs=test_kwargs):
-            return mut.run_test(**_kwargs)
-
-        status, payload_obj, run_id, app_link = _buffered_submit(
-            submit_thunk,
+        status, payload_obj, run_id, app_link = start_run(
+            build_model,
+            submit=False,
+            run_kwargs=test_kwargs,
             okareo=okareo,
             project_id=project_id,
             scenario_set_id=_get_attr(scenario, "scenario_id"),
-            name=run_name,
             types=[test_run_type],
         )
         if status == "failed":

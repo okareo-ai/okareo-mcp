@@ -1,8 +1,8 @@
 """Integration: run_simulation augmented path (spec 023-tool-fixes US4, US5, US8).
 
 Mocks the okareo SDK boundary and verifies:
-- Each of the 6 non-noise strategies produces a run_test call carrying the
-  augmentation block on simulation_params (T017).
+- Each of the 6 non-noise strategies produces a submission (voice Targets are
+  submitted, 049) carrying the augmentation block on simulation_params (T017).
 - Composing noise with a non-noise strategy works; two non-noise strategies
   are rejected before any SDK call (T022).
 - The four peer simulation_params knobs reach the backend (T034).
@@ -107,7 +107,9 @@ def _mock_okareo_for_augmented_path(target=None, driver=None):
     mut_result.id = "test-run-id-xyz"
     mut_result.name = "augmented-run"
     mut_result.app_link = "https://app.okareo.com/test_runs/xyz"
-    mut_instance.run_test.return_value = mut_result
+    mut_result.status = "FINISHED"
+    mut_result.failure_message = None
+    mut_instance.submit_test.return_value = mut_result
     return okareo, mut_instance
 
 
@@ -137,7 +139,7 @@ class TestEachStrategy:
     @patch("okareo.model_under_test.ModelUnderTest")
     @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
-    def test_strategy_reaches_run_test(
+    def test_strategy_reaches_the_submission(
         self, mock_client, mock_project, mock_mut_class, strategy_name,
         strategy_config, tools, mock_get_scenario_sets, sim_submission,):
         mock_project.return_value = ResolvedProject(id="00000000-0000-0000-0000-000000000111", name="Global", basis="default")
@@ -159,8 +161,8 @@ class TestEachStrategy:
         assert result["test_run_id"] == "test-run-id-xyz"
 
         # Verify the augmentation block was forwarded.
-        mut_instance.run_test.assert_called_once()
-        kwargs = mut_instance.run_test.call_args.kwargs
+        mut_instance.submit_test.assert_called_once()
+        kwargs = mut_instance.submit_test.call_args.kwargs
         sim_params = kwargs["simulation_params"]
         emitted = sim_params.to_dict()
         assert "augmentation" in emitted
@@ -198,8 +200,8 @@ class TestComposition:
         ))
 
         assert "error" not in result, result
-        mut_instance.run_test.assert_called_once()
-        emitted = mut_instance.run_test.call_args.kwargs["simulation_params"].to_dict()
+        mut_instance.submit_test.assert_called_once()
+        emitted = mut_instance.submit_test.call_args.kwargs["simulation_params"].to_dict()
         assert "barge_in" in emitted["augmentation"]
         assert "noise" in emitted["augmentation"]
 
@@ -230,7 +232,7 @@ class TestComposition:
         assert set(result["conflicting_strategies"]) == {"cap", "secondary_speaker"}
         # SDK / mut MUST NOT be touched (FR-026).
         okareo.get_target_by_name.assert_not_called()
-        mut_instance.run_test.assert_not_called()
+        mut_instance.submit_test.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +264,7 @@ class TestVoiceTargetPreflight:
         assert "error" in result
         assert "voice Targets" in result["error"]
         assert result["target_type"] == "custom_endpoint"
-        mut_instance.run_test.assert_not_called()
+        mut_instance.submit_test.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +295,7 @@ class TestRangePreflight:
         assert "[0.0, 1.0]" in result["error"]
         # No network calls at all (FR-026).
         okareo.get_target_by_name.assert_not_called()
-        mut_instance.run_test.assert_not_called()
+        mut_instance.submit_test.assert_not_called()
 
     @patch("okareo.model_under_test.ModelUnderTest")
     @patch("src.tools.simulations.get_okareo_client")
@@ -317,7 +319,7 @@ class TestRangePreflight:
         assert result["strategy"] == "echo"
         assert "known" in result
         assert "cap" in result["known"]
-        mut_instance.run_test.assert_not_called()
+        mut_instance.submit_test.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +347,7 @@ class TestPeerKnobs:
         ))
 
         assert "error" not in result, result
-        emitted = mut_instance.run_test.call_args.kwargs[
+        emitted = mut_instance.submit_test.call_args.kwargs[
             "simulation_params"].to_dict()
         assert emitted["silence_timeout_ms"] == 8000
 
@@ -486,7 +488,7 @@ class TestDropoutAndStartAtTurn:
     @patch("okareo.model_under_test.ModelUnderTest")
     @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
-    def test_dropout_plus_noise_sdk_spelling_reaches_run_test(
+    def test_dropout_plus_noise_sdk_spelling_reaches_the_submission(
         self, mock_client, mock_project, mock_mut_class, tools,
         mock_get_scenario_sets, sim_submission,
     ):
@@ -499,7 +501,7 @@ class TestDropoutAndStartAtTurn:
             mock_get_scenario_sets, block,
         )
         assert "error" not in result, result
-        emitted = mut_instance.run_test.call_args.kwargs["simulation_params"].to_dict()
+        emitted = mut_instance.submit_test.call_args.kwargs["simulation_params"].to_dict()
         assert emitted["augmentation"] == block
 
     @patch("okareo.model_under_test.ModelUnderTest")
@@ -520,7 +522,7 @@ class TestDropoutAndStartAtTurn:
             "dropout would never fire. Lower start_at_turn or raise max_turns."
         )
         okareo.get_target_by_name.assert_not_called()
-        mut_instance.run_test.assert_not_called()
+        mut_instance.submit_test.assert_not_called()
 
     @patch("okareo.model_under_test.ModelUnderTest")
     @patch("src.tools.simulations.resolve_project")
@@ -536,7 +538,7 @@ class TestDropoutAndStartAtTurn:
             max_turns=5,
         )
         assert "error" not in result, result
-        mut_instance.run_test.assert_called_once()
+        mut_instance.submit_test.assert_called_once()
 
 
 class TestEndAtTurn:
@@ -545,7 +547,7 @@ class TestEndAtTurn:
     @patch("okareo.model_under_test.ModelUnderTest")
     @patch("src.tools.simulations.resolve_project")
     @patch("src.tools.simulations.get_okareo_client")
-    def test_window_reaches_run_test_unchanged(
+    def test_window_reaches_the_submission_unchanged(
         self, mock_client, mock_project, mock_mut_class, tools,
         mock_get_scenario_sets, sim_submission,
     ):
@@ -558,7 +560,7 @@ class TestEndAtTurn:
             mock_get_scenario_sets, block, max_turns=5,
         )
         assert "error" not in result, result
-        emitted = mut_instance.run_test.call_args.kwargs["simulation_params"].to_dict()
+        emitted = mut_instance.submit_test.call_args.kwargs["simulation_params"].to_dict()
         assert emitted["augmentation"] == block
 
     @patch("okareo.model_under_test.ModelUnderTest")
@@ -581,7 +583,7 @@ class TestEndAtTurn:
         )
         assert result["field"] == "augmentation.dropout.end_at_turn"
         okareo.get_target_by_name.assert_not_called()
-        mut_instance.run_test.assert_not_called()
+        mut_instance.submit_test.assert_not_called()
 
 
 class TestPayloadUnchanged:
@@ -615,5 +617,5 @@ class TestPayloadUnchanged:
             mock_get_scenario_sets, block,
         )
         assert "error" not in result, result
-        emitted = mut_instance.run_test.call_args.kwargs["simulation_params"].to_dict()
+        emitted = mut_instance.submit_test.call_args.kwargs["simulation_params"].to_dict()
         assert json.dumps(emitted["augmentation"]) == json.dumps(block)

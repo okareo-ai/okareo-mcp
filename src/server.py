@@ -20,9 +20,11 @@ In streamable-http mode there is no startup API key — the auth verifier
 rejects every request before it reaches a tool until the credential is valid.
 """
 
+import asyncio
 import logging
 import os
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 
@@ -39,6 +41,7 @@ except ImportError:
     # still runs as long as the required env vars are exported by the shell.
     pass
 
+import anyio.lowlevel
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
@@ -48,9 +51,17 @@ from pydantic import AnyHttpUrl
 from src.analytics import emit_tool_event, init_analytics, shutdown_analytics
 from src.analytics_context import call_scope
 from src.auth.protected_resource import OkareoFastMCP
+from src.call_context import (
+    install_log_record_factory,
+    new_call_id,
+    set_call_id,
+    single_line_formatter,
+)
 from src.error_handling import format_tool_error
 from src.key_registry import scan_provider_keys
 from src.okareo_client import create_okareo_client
+from src.process_memory import memory_mib
+from src.tool_threads import ToolThreadsMixin, busy_tool_threads
 from src.tools import (
     checks,
     clone,
@@ -66,16 +77,18 @@ from src.tools import (
     voice,
 )
 
-_server_ready = False
 _analytics_client = None
 # Cached Okareo client; None when not yet initialized or init failed.
 _okareo_client = None
 _key_registry: dict[str, str] = {}
 
-# Module logger for server-lifecycle and per-tool-call traces. Routed through
-# `logging` (not raw `print`) so FASTMCP_LOG_LEVEL controls visibility — the
-# Docker image pins it to WARNING; local runs inherit the FastMCP INFO default.
+# Module logger for server-lifecycle and per-tool-call traces. The tool-call
+# lines are how a burst, a slow tool or a memory jump is traced in production,
+# so they are logged at INFO on purpose. (FastMCP passes its own log_level,
+# INFO by default, to its settings, which overrides FASTMCP_LOG_LEVEL; the
+# Docker image's WARNING has never taken effect.)
 _logger = logging.getLogger(__name__)
+_logger.setLevel(logging.INFO)
 
 
 _TRANSPORT = os.environ.get("TRANSPORT", "stdio")
@@ -165,7 +178,7 @@ async def lifespan(server: FastMCP):
     In **stdio mode** we still initialize the shared ``_okareo_client`` from
     ``OKAREO_API_KEY`` since that's the single-tenant install model.
     """
-    global _server_ready, _okareo_client, _key_registry, _analytics_client
+    global _okareo_client, _key_registry, _analytics_client
 
     base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
     _logger.info("Base URL: %s", base_url)
@@ -212,19 +225,17 @@ async def lifespan(server: FastMCP):
             "Transport: streamable-http (multi-tenant), Port: %s",
             port,
         )
-        _analytics_client = init_analytics()
-
-        _server_ready = True
-        try:
-            yield {
-                "okareo": None,
-                "key_registry": _key_registry,
-                "analytics": _analytics_client,
-            }
-        finally:
-            _server_ready = False
-            await shutdown_analytics(_analytics_client)
-            _analytics_client = None
+        # In stateless HTTP mode the MCP SDK runs this function for every
+        # request, so the analytics client is created once and lives for the
+        # process. Closing it here closed it for every overlapping request
+        # still about to send (049, research R10).
+        if _analytics_client is None:
+            _analytics_client = init_analytics()
+        yield {
+            "okareo": None,
+            "key_registry": _key_registry,
+            "analytics": _analytics_client,
+        }
         return
 
     # ---- stdio mode below (single-tenant) ----
@@ -286,7 +297,6 @@ async def lifespan(server: FastMCP):
     )
     _analytics_client = init_analytics()
 
-    _server_ready = True
     try:
         yield {
             "okareo": okareo,
@@ -294,7 +304,6 @@ async def lifespan(server: FastMCP):
             "analytics": _analytics_client,
         }
     finally:
-        _server_ready = False
         await shutdown_analytics(_analytics_client)
         _analytics_client = None
 
@@ -581,12 +590,41 @@ if _HTTP_MODE:
     _fastmcp_kwargs["stateless_http"] = True
     _fastmcp_kwargs["json_response"] = True
 
-# OkareoFastMCP serves the protected-resource document itself so that its
-# `authorization_servers` is identical to the AS document's `issuer` — the SDK
-# renders it with a trailing slash, and RFC 8414 §3.3 clients (Copilot CLI)
-# refuse the mismatch (046). In stdio mode there is no such document and the
-# subclass behaves exactly like FastMCP.
-mcp = OkareoFastMCP("okareo-mcp", **_fastmcp_kwargs)
+class OkareoServer(ToolThreadsMixin, OkareoFastMCP):
+    """The production server class.
+
+    ``ToolThreadsMixin`` runs every plain-function tool on a worker thread, so
+    a slow tool never holds the event loop (049). ``OkareoFastMCP`` serves the
+    protected-resource document itself so that its `authorization_servers` is
+    identical to the AS document's `issuer` — the SDK renders it with a
+    trailing slash, and RFC 8414 §3.3 clients (Copilot CLI) refuse the
+    mismatch (046). In stdio mode there is no such document and that part
+    behaves exactly like FastMCP.
+    """
+
+
+mcp = OkareoServer("okareo-mcp", **_fastmcp_kwargs)
+
+def _use_single_line_logs() -> None:
+    """Replace the root log handlers with one that writes each record as one
+    line on stderr, level and call id first.
+
+    FastMCP installs a Rich handler that wraps lines at 80 columns, and Cloud
+    Run stores every line as its own entry, so a record's pieces could not be
+    searched or tied back to their call (049, research R12).
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(single_line_formatter())
+    root.addHandler(stderr_handler)
+
+
+# Every log record carries the id of the tool call that caused it (049).
+install_log_record_factory()
+if _HTTP_MODE:
+    _use_single_line_logs()
 
 if _HTTP_MODE:
     # OAuth Proxy wiring (2026-05-16 redesign):
@@ -874,13 +912,22 @@ _original_call_tool = mcp.call_tool
 
 
 def _tool_log(line: str) -> None:
-    """Emit a single tool-call log line at INFO.
-
-    Routed through `logging` so FASTMCP_LOG_LEVEL governs visibility — the
-    Docker image pins WARNING (so these are hidden in production logs),
-    while local runs keep the FastMCP INFO default and see them.
-    """
+    """Emit a single tool-call log line at INFO."""
     _logger.info(line)
+
+
+def _done_resources() -> str:
+    """Tool calls on worker threads, every thread in the process, and the
+    process's memory, for the DONE line. A leak shows as ``threads`` or
+    ``rss_mib`` climbing from one call to the next."""
+    rss, peak = memory_mib()
+    busy = busy_tool_threads()
+    return (
+        f"busy_threads={'-' if busy is None else busy} "
+        f"threads={threading.active_count()} "
+        f"rss_mib={'-' if rss is None else rss} "
+        f"peak_mib={'-' if peak is None else peak}"
+    )
 
 
 def _current_org_id() -> str | None:
@@ -937,82 +984,113 @@ def _error_content(message: str) -> CallToolResult:
     )
 
 
-async def _instrumented_call_tool(name, arguments):
-    global _okareo_client, _key_registry
+def _throttled() -> CallToolResult | None:
+    """A 429-shaped tool error when the caller's credential is over its rate
+    (HTTP mode only), so it doesn't reach the Okareo backend at all."""
+    if not (_HTTP_MODE and _throttle is not None and _throttle.enabled):
+        return None
+    org_id = _current_org_id()
+    if not org_id:
+        return None
+    allowed, retry_after = _throttle.try_acquire(org_id)
+    if allowed:
+        return None
+    import json
 
-    # Throttle (HTTP mode only). Reject early with a 429-shaped tool error
-    # so the abusive credential doesn't reach the Okareo backend at all.
-    if _HTTP_MODE and _throttle is not None and _throttle.enabled:
-        org_id = _current_org_id()
-        if org_id:
-            allowed, retry_after = _throttle.try_acquire(org_id)
-            if not allowed:
-                import json
-                return _error_content(
-                    json.dumps(
-                        {
-                            "error": {
-                                "code": "rate_limited",
-                                "message": (
-                                    "Too many requests for this credential. "
-                                    f"Retry after ~{retry_after:.1f}s."
-                                ),
-                                "data": {
-                                    "retry_after_seconds": retry_after,
-                                },
-                            }
-                        }
-                    )
-                )
-
-    # Lazy re-initialization (stdio mode only — HTTP mode constructs a
-    # per-request Okareo client inside each tool via get_okareo_client(),
-    # which reads the SessionCredential ContextVar; the shared _okareo_client
-    # global is never populated in HTTP mode and shouldn't be checked).
-    if not _HTTP_MODE and _okareo_client is None:
-        api_key = os.environ.get("OKAREO_API_KEY", "").strip()
-        if not api_key:
-            return _error_content(
-                format_tool_error(
-                    ValueError(
-                        "OKAREO_API_KEY is not set. "
-                        "Get your key at app.okareo.com and add it to "
-                        "your MCP server configuration."
+    return _error_content(
+        json.dumps(
+            {
+                "error": {
+                    "code": "rate_limited",
+                    "message": (
+                        "Too many requests for this credential. "
+                        f"Retry after ~{retry_after:.1f}s."
                     ),
-                    _key_registry,
-                )
+                    "data": {"retry_after_seconds": retry_after},
+                }
+            }
+        )
+    )
+
+
+def _stdio_client_missing() -> CallToolResult | None:
+    """Lazy re-initialization of the shared client (stdio mode only); the
+    error to return when it can't be built.
+
+    HTTP mode constructs a per-request Okareo client inside each tool via
+    get_okareo_client(), which reads the SessionCredential ContextVar; the
+    shared _okareo_client is never populated there and isn't checked.
+    """
+    global _okareo_client, _key_registry
+    if _HTTP_MODE or _okareo_client is not None:
+        return None
+    api_key = os.environ.get("OKAREO_API_KEY", "").strip()
+    if not api_key:
+        return _error_content(
+            format_tool_error(
+                ValueError(
+                    "OKAREO_API_KEY is not set. "
+                    "Get your key at app.okareo.com and add it to "
+                    "your MCP server configuration."
+                ),
+                _key_registry,
             )
-        base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
-        try:
-            _okareo_client = create_okareo_client(api_key, base_url)
-            _key_registry = scan_provider_keys()
-        except Exception as e:
-            return _error_content(format_tool_error(e, _key_registry))
+        )
+    base_url = os.environ.get("OKAREO_BASE_URL", "https://api.okareo.com/")
+    try:
+        _okareo_client = create_okareo_client(api_key, base_url)
+        _key_registry = scan_provider_keys()
+    except Exception as e:
+        return _error_content(format_tool_error(e, _key_registry))
+    return None
+
+
+async def _instrumented_call_tool(name, arguments):
+    refusal = _throttled() or _stdio_client_missing()
+    if refusal is not None:
+        return refusal
 
     org_id = _current_org_id()
     auth_kind = _current_auth_kind()
     started_at = time.monotonic()
+    call_id_token = set_call_id(new_call_id())
     _tool_log(
         f"[tool] CALL  name={name} org={org_id or '-'} auth={auth_kind or '-'}"
     )
 
     success = True
     error_summary = ""
+    cancelled = False
     # Scope encloses both dispatch and emit so annotations survive until read.
     with call_scope() as annotations:
         try:
             result = await _original_call_tool(name, arguments)
+            # A tool on a worker thread can't be stopped: when the caller is
+            # cancelled mid-call, the tool finishes and the cancellation
+            # lands at the next await. Take it here, so the call is logged
+            # as cancelled rather than OK.
+            await anyio.lowlevel.checkpoint_if_cancelled()
             return result
+        except asyncio.CancelledError:
+            # The caller went away (a client disconnect). The tool finished on
+            # its thread, but nobody received the answer.
+            success = False
+            cancelled = True
+            raise
         except Exception as e:
             success = False
             error_summary = type(e).__name__
             return _error_content(format_tool_error(e, _key_registry))
         finally:
             duration_ms = int((time.monotonic() - started_at) * 1000)
-            outcome = "OK" if success else f"FAIL({error_summary})"
+            if cancelled:
+                outcome = "CANCELLED"
+            else:
+                outcome = "OK" if success else f"FAIL({error_summary})"
             _tool_log(
                 f"[tool] DONE  name={name} org={org_id or '-'} "
-                f"auth={auth_kind or '-'} outcome={outcome} duration_ms={duration_ms}"
+                f"auth={auth_kind or '-'} outcome={outcome} duration_ms={duration_ms} "
+                f"{_done_resources()}"
             )
             # Analytics: fire-and-forget, never blocks tool execution
             try:
@@ -1025,6 +1103,7 @@ async def _instrumented_call_tool(name, arguments):
                     )
             except Exception:
                 pass
+            call_id_token.var.reset(call_id_token)
 
 
 # Route tool dispatch through the instrumented wrapper (analytics, throttling,

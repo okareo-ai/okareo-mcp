@@ -199,8 +199,13 @@ class TestRunTestToolHandoff:
         scen_mod = MagicMock()
         scen_mod.sync.return_value = [scenario]
 
+        from okareo_api_client import Client
+
         okareo = MagicMock()
         okareo.api_key = "k"
+        # A real client: run_test's Run request runs on a copy of it without
+        # a timeout (049).
+        okareo.client = Client(base_url="http://okareo.test", raise_on_unexpected_status=True)
         okareo.get_all_checks.return_value = [_check_brief("coherence", "id-coh")]
         mock_client.return_value = okareo
         mock_resolve.return_value = ResolvedProject(id="proj", name="Global", basis="default")
@@ -224,7 +229,7 @@ class TestRunTestToolHandoff:
             p.stop()
         self._patches = []
 
-    @patch("src.tools.simulations._find_runs", lambda *a, **k: {})
+    @patch("src.run_start.find_runs_by_tag", lambda *a, **k: {})
     @patch("src.tools.tests.resolve_project")
     @patch("src.tools.tests.get_okareo_client")
     def test_finished_inline_returns_handoff(self, mock_client, mock_resolve):
@@ -256,7 +261,7 @@ class TestRunTestToolHandoff:
         assert "get_conversation_transcript" not in out["message"]
         mut.run_test.assert_called_once()
 
-    @patch("src.tools.simulations._find_runs", lambda *a, **k: {})
+    @patch("src.run_start.find_runs_by_tag", lambda *a, **k: {})
     @patch("src.tools.tests.resolve_project")
     @patch("src.tools.tests.get_okareo_client")
     def test_failure_surfaces_inline(self, mock_client, mock_resolve):
@@ -278,6 +283,79 @@ class TestRunTestToolHandoff:
             ))
 
         assert "error" in out
+
+    @patch("src.run_start.find_runs_by_tag", lambda *a, **k: {})
+    @patch("src.tools.tests.resolve_project")
+    @patch("src.tools.tests.get_okareo_client")
+    def test_run_test_sends_the_models_keys_from_a_real_listing_row(
+        self, mock_client, mock_resolve
+    ):
+        """The model listing hands run_test its `models` as the generated
+        container, never a plain dict. Built from that real shape, with only
+        the network faked, so the SDK's own check of the model's keys runs.
+        Discarding the container made every run_test fail in that check,
+        before any Run was requested (since 37de1b2).
+        """
+        from okareo_api_client import Client
+        from okareo_api_client.api import default as _default_pkg
+        from okareo_api_client.models.model_under_test_response import (
+            ModelUnderTestResponse,
+        )
+        import okareo.model_under_test as sdk_mut
+
+        row = ModelUnderTestResponse.from_dict({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "project_id": "00000000-0000-0000-0000-000000000002",
+            "name": "my-model",
+            "tags": [],
+            "version": 1,
+            "time_created": "2026-10-08T00:00:00",
+            "models": {"generation": {
+                "type": "generation",
+                "model_id": "gpt-4o-mini",
+                "system_prompt_template": "You are a support agent.",
+            }},
+        })
+        assert not isinstance(row.models, dict)  # what the live API hands the tool
+
+        okareo = MagicMock()
+        okareo.api_key = "k"
+        okareo.client = Client(base_url="http://okareo.test", raise_on_unexpected_status=True)
+        okareo.get_all_checks.return_value = [_check_brief("latency", "c1")]
+        mock_client.return_value = okareo
+        mock_resolve.return_value = ResolvedProject(id="p1", name="Global", basis="default")
+        scen_mod = MagicMock()
+        scen_mod.sync.return_value = [SimpleNamespace(name="my-scenario", scenario_id="sid")]
+        listing = MagicMock()
+        listing.sync.return_value = [row]
+        sent = {}
+
+        def run_request(client, api_key, body):
+            sent["api_keys"] = body.api_keys.to_dict()
+            return SimpleNamespace(
+                id="tr-1", name="my-scenario-my-model", app_link="http://app/tr-1"
+            )
+
+        ctx = SimpleNamespace(request_context=SimpleNamespace(
+            lifespan_context={"key_registry": {"generation": "provider-key"}}
+        ))
+        with patch.object(
+            _default_pkg, "get_scenario_sets_v0_scenario_sets_get",
+            scen_mod, create=True,
+        ), patch.object(
+            _default_pkg, "get_all_models_under_test_v0_models_under_test_get",
+            listing, create=True,
+        ), patch.object(sdk_mut.run_test_v0_test_run_post, "sync", run_request):
+            out = json.loads(_tests_tools()["run_test"](
+                scenario_name="my-scenario",
+                model_name="my-model",
+                checks=["latency"],
+                ctx=ctx,
+            ))
+
+        assert "error" not in out, out
+        assert out["test_run_id"] == "tr-1"
+        assert list(sent["api_keys"]) == ["generation"]
 
 
 # ---------------------------------------------------------------------------

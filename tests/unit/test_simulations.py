@@ -33,6 +33,15 @@ def _default_project_list():
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _start(build_model, kw):
+    """Start the Run the way src.run_start does, on the path the tool chose."""
+    from unittest.mock import MagicMock
+
+    mut = build_model(MagicMock())
+    method = mut.submit_test if kw["submit"] else mut.run_test
+    return method(**kw["run_kwargs"])
+
+
 def _register_and_get_tools():
     """Register simulation tools on a mock MCP and return the tool functions."""
     from mcp.server.fastmcp import FastMCP
@@ -1261,7 +1270,7 @@ class TestAnalyticsAnnotations:
 
         assert annotations["is_voice"] is True
 
-    @patch("src.tools.simulations._buffered_submit")
+    @patch("src.tools.simulations.start_run")
     @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_run_simulation_annotations_finished(
@@ -1303,7 +1312,7 @@ class TestAnalyticsAnnotations:
         assert annotations["is_rerun"] is False
         assert annotations["project_id"] == "proj-1"
 
-    @patch("src.tools.simulations._buffered_submit")
+    @patch("src.tools.simulations.start_run")
     @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_run_simulation_running_and_rerun(
@@ -1348,7 +1357,7 @@ class TestAnalyticsAnnotations:
         assert annotations["is_rerun"] is True
         assert annotations["entity_id"] == "run-live"
 
-    @patch("src.tools.simulations._buffered_submit")
+    @patch("src.tools.simulations.start_run")
     @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_run_simulation_failed_status(
@@ -1474,7 +1483,7 @@ class TestRunSimulationResolutionErrors:
 
     @patch("src.tools.simulations._fetch_drivers")
     @patch("src.tools.simulations._fetch_targets")
-    @patch("src.tools.simulations._buffered_submit")
+    @patch("src.tools.simulations.start_run")
     @patch("src.tools.simulations.resolve_project", return_value=ResolvedProject(id="proj-1", name="Global", basis="default"))
     @patch("src.tools.simulations.get_okareo_client")
     def test_rerun_resolves_target_and_driver_by_id(
@@ -1816,7 +1825,8 @@ class TestRerunInheritance:
     Changing the driver silently reset max_turns to 5 and dropped stop_check,
     augmentation and the check list.
 
-    Assertions read `ModelUnderTest.run_test`'s kwargs: the single point where
+    Assertions read the kwargs the Run is started with (`submit_test` or
+    `run_test`, 049): the single point where
     the fully-resolved configuration is handed off, so they test what is
     actually applied rather than what a response says was applied.
     """
@@ -1854,7 +1864,7 @@ class TestRerunInheritance:
 
     def _rerun(self, original=None, **kwargs):
         """Start a rerun; return (response, applied) where `applied` holds the
-        kwargs handed to ModelUnderTest.run_test."""
+        kwargs the Run is started with (submit_test or run_test)."""
         import json
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
@@ -1892,8 +1902,9 @@ class TestRerunInheritance:
                    )), \
              patch.object(pkg, "get_scenario_sets_v0_scenario_sets_get", scen_mod, create=True), \
              patch.object(mut_mod.ModelUnderTest, "run_test", _run_test), \
-             patch("src.tools.simulations._buffered_submit",
-                   lambda thunk, **kw: ("finished", thunk(), "new-run", "")):
+             patch.object(mut_mod.ModelUnderTest, "submit_test", _run_test), \
+             patch("src.tools.simulations.start_run",
+                   lambda build_model, **kw: ("finished", _start(build_model, kw), "new-run", "")):
             raw = tools["run_simulation"](
                 name="rerun", based_on_run_id="orig-run", **kwargs
             )
@@ -2069,7 +2080,7 @@ class TestRerunInheritance:
              patch("src.tools.simulations._fetch_drivers",
                    return_value=[{"id": "d1", "name": "confused-caller"}]), \
              patch.object(pkg, "get_scenario_sets_v0_scenario_sets_get", scen_mod, create=True), \
-             patch("src.tools.simulations._buffered_submit",
+             patch("src.tools.simulations.start_run",
                    lambda *a, **kw: ("running", None, "new-run", "")):
             json.loads(tools["run_simulation"](name="r", based_on_run_id="orig-run"))
         assert calls and all(p.return_model_metrics is False for p in calls)
